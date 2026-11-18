@@ -64,7 +64,13 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     test_elf64_loader_and_ring3_execution();
     test_multiuser_permissions_acl_and_execute_as();
 
-    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 10 KERNEL TESTS PASSED");
+    // Milestone 9 & 11 tests (User-Space /sbin/init, /bin/aethersh pipelines/redirection, coreutils, aetherpkg, sudo)
+    test_userspace_init_aethersh_pipelines_and_aetherpkg();
+
+    // Milestone 12 tests (PCI enumeration, CMOS RTC, Networking Stack Ethernet/IPv4/ICMP/UDP & packet fuzzing)
+    test_drivers_pci_rtc_and_network_stack();
+
+    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 12 KERNEL & USERSPACE TESTS PASSED");
     // Exit code 0x10 -> QEMU exit status ((0x10 << 1) | 1) = 33 (PASS)
     qemu_debug_exit(0x10);
 }
@@ -1100,5 +1106,167 @@ fn test_multiuser_permissions_acl_and_execute_as() {
         "[TEST PASS] multiuser_permissions_acl_and_execute_as (acl_entries={}, recovery_replayed={})",
         persisted_acl.len(),
         report.replayed_journal_tx
+    );
+}
+
+fn test_userspace_init_aethersh_pipelines_and_aetherpkg() {
+    use crate::fs;
+    use crate::security;
+
+    // 1. Spawn `/sbin/init --verify-once` in Ring 3!
+    //    `/sbin/init` reads `/etc/services.conf`, runs `/bin/uname -a` and `/bin/aethersh --boot-verify`
+    //    (which executes `echo hello > /tmp/sh_test.txt`, `echo world >> /tmp/sh_test.txt`,
+    //     `cat /tmp/sh_test.txt`, `ps | grep init`, `id`, `ls -l /etc`, `aetherpkg list`).
+    let init_argv = alloc::vec![String::from("/sbin/init"), String::from("--verify-once"),];
+    let init_envp = alloc::vec![
+        String::from("PATH=/bin:/sbin:/usr/bin"),
+        String::from("HOME=/root"),
+    ];
+    let init_pid = sched::exec::spawn_elf_process_from_vfs(
+        "/sbin/init",
+        &init_argv,
+        &init_envp,
+        Credentials::root(),
+        None,
+    )
+    .expect("spawn /sbin/init --verify-once");
+    let init_exit = sched::wait_tid(init_pid).expect("wait_tid(/sbin/init)");
+    assert_eq!(
+        init_exit, 0,
+        "/sbin/init --verify-once exited with {}",
+        init_exit
+    );
+
+    // 2. Verify that `aethersh` redirection created `/tmp/sh_test.txt` with `"hello\nworld\n"`!
+    let sh_out = fs::vfs_read_all("/tmp/sh_test.txt").expect("read /tmp/sh_test.txt");
+    assert_eq!(
+        core::str::from_utf8(&sh_out).unwrap(),
+        "hello\nworld\n",
+        "aethersh '>' and '>>' redirection output mismatch"
+    );
+
+    // 3. Verify that `/sbin/init` wrote structured service supervision logs to `/var/log/init.log`
+    let init_log = fs::vfs_read_all("/var/log/init.log").expect("read /var/log/init.log");
+    let init_log_str = core::str::from_utf8(&init_log).unwrap();
+    assert!(init_log_str.contains("Starting service 'aethersh'"));
+
+    // 4. Test `aetherpkg install aether-devtools` (resolves dependency `aether-base`) and `aetherpkg verify`
+    let pkg_argv = alloc::vec![
+        String::from("/bin/aetherpkg"),
+        String::from("install"),
+        String::from("aether-devtools"),
+    ];
+    let pkg_pid = sched::exec::spawn_elf_process_from_vfs(
+        "/bin/aetherpkg",
+        &pkg_argv,
+        &init_envp,
+        Credentials::root(),
+        None,
+    )
+    .expect("spawn /bin/aetherpkg install");
+    assert_eq!(sched::wait_tid(pkg_pid), Ok(0));
+
+    let verify_argv = alloc::vec![String::from("/bin/aetherpkg"), String::from("verify")];
+    let ver_pid = sched::exec::spawn_elf_process_from_vfs(
+        "/bin/aetherpkg",
+        &verify_argv,
+        &init_envp,
+        Credentials::root(),
+        None,
+    )
+    .expect("spawn /bin/aetherpkg verify");
+    assert_eq!(sched::wait_tid(ver_pid), Ok(0));
+
+    // 5. Test `/bin/sudo /bin/id` launched as unprivileged user `aether` (UID 1000, in %wheel)
+    let sudo_argv = alloc::vec![String::from("/bin/sudo"), String::from("/bin/id")];
+    let sudo_pid = sched::exec::spawn_elf_process_from_vfs(
+        "/bin/sudo",
+        &sudo_argv,
+        &init_envp,
+        security::aether_user_credentials(),
+        None,
+    )
+    .expect("spawn /bin/sudo /bin/id as UID 1000");
+    assert_eq!(sched::wait_tid(sudo_pid), Ok(0));
+
+    crate::kinfo!(
+        "[TEST PASS] userspace_init_aethersh_pipelines_and_aetherpkg (init_pid={}, log_bytes={})",
+        init_pid,
+        init_log.len()
+    );
+}
+
+fn test_drivers_pci_rtc_and_network_stack() {
+    use crate::drivers::{pci, rtc};
+    use crate::net::{
+        self, build_ipv4_icmp_echo, build_ipv4_udp_packet, parse_ipv4_packet, ICMP_ECHO_REPLY,
+        ICMP_ECHO_REQUEST,
+    };
+
+    // 1. PCI Enumeration
+    let devs = pci::devices();
+    assert!(
+        devs.len() >= 3,
+        "expected >= 3 PCI devices in QEMU, found {}",
+        devs.len()
+    );
+
+    // 2. CMOS RTC
+    let dt = rtc::read_rtc_datetime();
+    assert!(dt.year >= 2024 && (1..=12).contains(&dt.month) && (1..=31).contains(&dt.day));
+
+    // 3. Networking Stack: IPv4 + ICMP Echo Request -> Echo Reply with verified RFC 1071 checksum
+    let ping_pkt = build_ipv4_icmp_echo(
+        [10, 0, 2, 2],
+        [10, 0, 2, 15],
+        ICMP_ECHO_REQUEST,
+        0xAE74,
+        1,
+        b"AetherOS-Ping-Payload",
+    );
+    let reply = net::process_inbound_ipv4(&ping_pkt)
+        .expect("process ICMP Echo Request")
+        .expect("expected ICMP Echo Reply");
+    let (rep_hdr, rep_icmp) = parse_ipv4_packet(&reply).expect("parse ICMP Echo Reply");
+    assert_eq!(rep_hdr.src_ip, [10, 0, 2, 15]);
+    assert_eq!(rep_hdr.dst_ip, [10, 0, 2, 2]);
+    assert_eq!(rep_icmp[0], ICMP_ECHO_REPLY);
+    assert_eq!(&rep_icmp[8..], b"AetherOS-Ping-Payload");
+
+    // 4. UDP loopback delivery
+    let udp_pkt = build_ipv4_udp_packet([127, 0, 0, 1], [127, 0, 0, 1], 40000, 8080, b"UDP-OK");
+    assert_eq!(net::process_inbound_ipv4(&udp_pkt), Ok(None));
+    let (src_ip, src_port, payload) =
+        net::recv_udp_datagram(8080).expect("recv_udp_datagram(8080)");
+    assert_eq!(src_ip, [127, 0, 0, 1]);
+    assert_eq!(src_port, 40000);
+    assert_eq!(&payload, b"UDP-OK");
+
+    // 5. Fuzz / bounds-check 2,000 mutated/truncated IPv4 packets -> must never panic
+    let mut rng = 0xCAFE_F00D_1234_5678u64;
+    for i in 0..2000u64 {
+        let mut mutated = ping_pkt.clone();
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        let idx = (rng as usize) % mutated.len();
+        mutated[idx] ^= (rng >> 8) as u8;
+        let len = if i % 5 == 0 {
+            (rng as usize) % mutated.len()
+        } else {
+            mutated.len()
+        };
+        let _ = net::process_inbound_ipv4(&mutated[..len]);
+    }
+
+    let (rx, tx, icmp_replies) = net::stats();
+    assert!(rx >= 2 && tx >= 1 && icmp_replies >= 1);
+    crate::kinfo!(
+        "[TEST PASS] drivers_pci_rtc_and_network_stack (pci_devs={}, rtc={:04}-{:02}-{:02}, icmp_replies={})",
+        devs.len(),
+        dt.year,
+        dt.month,
+        dt.day,
+        icmp_replies
     );
 }

@@ -9,3 +9,6 @@ echo "[lint] Running clippy on host workspace..."
 
 echo "[lint] Running clippy on x86_64 kernel..."
 (cd "$ROOT_DIR/kernel" && cargo clippy -- -D warnings)
+
+echo "[lint] Running clippy on Ring 3 ELF64 userspace..."
+(cd "$ROOT_DIR/userspace" && cargo clippy -- -D warnings)

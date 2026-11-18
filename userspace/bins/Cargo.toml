@@ -1,0 +1,11 @@
+[package]
+name = "aether-user-bins"
+version = "0.1.0-alpha.1"
+edition = "2021"
+license = "MIT"
+description = "Native AetherOS Ring 3 ELF64 system binaries (/sbin/init, /bin/aethersh, coreutils, aetherpkg)"
+
+[dependencies]
+libaether = { path = "../libaether" }
+aether-abi = { path = "../../crates/aether-abi", default-features = false }
+aether-uuid = { path = "../../crates/aether-uuid", default-features = false }

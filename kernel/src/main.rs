@@ -13,6 +13,7 @@ pub mod fs;
 pub mod ipc;
 pub mod log;
 pub mod mm;
+pub mod net;
 pub mod panic;
 pub mod sched;
 pub mod security;
@@ -186,7 +187,22 @@ pub extern "C" fn _start() -> ! {
         aetherfs_blocks
     );
 
-    // Stage 11: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
+    // Stage 11: Enumerate PCI Bus, read CMOS RTC time, and initialize Modular Network Stack
+    let pci_count = drivers::pci::init_and_enumerate();
+    let rtc_now = drivers::rtc::read_rtc_datetime();
+    net::init();
+    kinfo!(
+        "Drivers & Net ready: PCI devices={}, RTC={:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC, Net=lo(127.0.0.1)+eth0(10.0.2.15)",
+        pci_count,
+        rtc_now.year,
+        rtc_now.month,
+        rtc_now.day,
+        rtc_now.hour,
+        rtc_now.minute,
+        rtc_now.second
+    );
+
+    // Stage 12: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
     if let Err(err) = sched::init() {
         panic!("Preemptive Scheduler init failed: {}", err);
     }
@@ -199,9 +215,29 @@ pub extern "C" fn _start() -> ! {
         sched::stats().total_tasks
     );
 
-    // Stage 12: Run automated kernel self-tests when requested via kernel command line
+    // Stage 13: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    kinfo!("Kernel initialization complete. Entering idle halt loop.");
-    arch::x86_64::halt_loop()
+    // Stage 14: Launch user-space /sbin/init (PID 1) in Ring 3
+    let init_argv = alloc::vec![alloc::string::String::from("/sbin/init")];
+    let init_envp = alloc::vec![
+        alloc::string::String::from("PATH=/bin:/sbin:/usr/bin"),
+        alloc::string::String::from("HOME=/root"),
+        alloc::string::String::from("TERM=vt100"),
+    ];
+    match sched::exec::spawn_elf_process_from_vfs(
+        "/sbin/init",
+        &init_argv,
+        &init_envp,
+        sched::Credentials::root(),
+        Some(1),
+    ) {
+        Ok(pid) => kinfo!("Launched user-space /sbin/init in Ring 3 (PID={})", pid),
+        Err(e) => kwarn!("Could not launch /sbin/init: {:?}", e),
+    }
+
+    kinfo!("Kernel initialization complete. Handing execution to preemptive scheduler.");
+    loop {
+        sched::sleep_ms(1000);
+    }
 }

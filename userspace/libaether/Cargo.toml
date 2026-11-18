@@ -1,0 +1,10 @@
+[package]
+name = "libaether"
+version = "0.1.0-alpha.1"
+edition = "2021"
+license = "MIT"
+description = "AetherOS native Ring 3 user-space runtime, allocator, and syscall library"
+
+[dependencies]
+aether-abi = { path = "../../crates/aether-abi", default-features = false }
+aether-uuid = { path = "../../crates/aether-uuid", default-features = false }

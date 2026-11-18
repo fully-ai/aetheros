@@ -452,10 +452,10 @@ impl SharedRefTable {
                     e.refs -= 1;
                     return true;
                 } else {
-                    // Drops from 2 -> 1 (unique owner again)
+                    // Drops from 2 -> 1 (unique owner again; must still be kept in bitmap!)
                     e.phys = 0;
                     e.refs = 0;
-                    return false;
+                    return true;
                 }
             }
         }

@@ -318,7 +318,7 @@ pub fn spawn_elf_process_from_vfs(
         security::compute_exec_credentials(&initial_creds, &node, mount_flags, raw_path)?;
     let loaded = load_elf_into_new_address_space(&elf_bytes, argv, envp, eff_creds)?;
 
-    let kstack_top = vmm::alloc_guarded_kernel_stack(4).map_err(|_| {
+    let kstack_top = vmm::alloc_guarded_kernel_stack(16).map_err(|_| {
         loaded.address_space.destroy_user();
         Errno::Enomem
     })?;

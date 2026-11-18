@@ -8,7 +8,9 @@ MODE="${1:-fmt}"
 if [[ "$MODE" == "--check" ]]; then
     (cd "$ROOT_DIR" && cargo fmt --all -- --check)
     (cd "$ROOT_DIR/kernel" && cargo fmt --all -- --check)
+    (cd "$ROOT_DIR/userspace" && cargo fmt --all -- --check)
 else
     (cd "$ROOT_DIR" && cargo fmt --all)
     (cd "$ROOT_DIR/kernel" && cargo fmt --all)
+    (cd "$ROOT_DIR/userspace" && cargo fmt --all)
 fi

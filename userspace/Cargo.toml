@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+    "libaether",
+    "bins",
+]
+
+[profile.dev]
+panic = "abort"
+opt-level = "z"
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+lto = "thin"
+strip = true
