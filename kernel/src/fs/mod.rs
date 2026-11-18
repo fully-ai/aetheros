@@ -946,7 +946,9 @@ pub fn vfs_read_file(
             if dst.is_empty() {
                 return Ok(0);
             }
-            if let Some(b) = serial::read_byte_nonblocking() {
+            if let Some(b) =
+                serial::read_byte_nonblocking().or_else(crate::drivers::rtc::poll_ps2_ascii)
+            {
                 dst[0] = b;
                 return Ok(1);
             }
@@ -1011,7 +1013,9 @@ pub fn vfs_read_file(
                         if dst.is_empty() {
                             return Ok(0);
                         }
-                        if let Some(b) = serial::read_byte_nonblocking() {
+                        if let Some(b) = serial::read_byte_nonblocking()
+                            .or_else(crate::drivers::rtc::poll_ps2_ascii)
+                        {
                             dst[0] = b;
                             Ok(1)
                         } else {
@@ -1053,6 +1057,7 @@ pub fn vfs_write_file(
             }
             if let Ok(s) = core::str::from_utf8(src) {
                 serial::write_str(s);
+                crate::gui::append_terminal_output(s);
             } else {
                 for &b in src {
                     serial::COM1.lock().write_byte(b);
@@ -1102,6 +1107,7 @@ pub fn vfs_write_file(
                     CharDevKind::Console | CharDevKind::Tty | CharDevKind::Serial => {
                         if let Ok(s) = core::str::from_utf8(src) {
                             serial::write_str(s);
+                            crate::gui::append_terminal_output(s);
                         } else {
                             for &b in src {
                                 serial::COM1.lock().write_byte(b);

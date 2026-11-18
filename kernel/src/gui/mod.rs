@@ -233,12 +233,12 @@ impl Compositor {
         );
     }
 
-    /// Render an 8x12 synthesized bitmap glyph for ASCII characters into the backbuffer.
+    /// Render an 8x8 bitmap glyph for ASCII characters into the backbuffer.
     fn draw_char(&mut self, px: usize, py: usize, ch: u8, fg: u32) {
         if ch <= b' ' {
             return;
         }
-        let pattern = glyph_8x8(ch);
+        let pattern = fb::glyph_bitmap(ch);
         for (row_idx, &bits) in pattern.iter().enumerate() {
             for col_idx in 0..8usize {
                 if (bits & (0x80 >> col_idx)) != 0 {
@@ -373,60 +373,29 @@ impl Compositor {
     }
 }
 
-/// Deterministic 8x8 glyph generator for visible ASCII characters.
-fn glyph_8x8(ch: u8) -> [u8; 8] {
-    match ch {
-        b'A'..=b'Z' | b'a'..=b'z' => {
-            let idx = ch.to_ascii_uppercase() - b'A';
-            [
-                0x3C ^ (idx & 0x18),
-                0x66,
-                0x66 ^ (idx << 1),
-                0x7E,
-                0x66,
-                0x66,
-                0x66 ^ (idx & 0x24),
-                0x00,
-            ]
-        }
-        b'0'..=b'9' => {
-            let d = ch - b'0';
-            [
-                0x3C,
-                0x66,
-                0x66 ^ (d << 2),
-                0x76,
-                0x66,
-                0x66 ^ d,
-                0x3C,
-                0x00,
-            ]
-        }
-        b'-' => [0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00],
-        b'|' => [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00],
-        b':' => [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
-        b'/' => [0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x00],
-        b'.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00],
-        _ => [0x3C, 0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00],
-    }
-}
-
 static COMPOSITOR: IrqSpinLock<Compositor> = IrqSpinLock::new(Compositor::new_empty());
 
 /// Initialize the Milestone 14 desktop compositor and populate the initial 3 system windows.
 pub fn init_desktop() -> (usize, usize, u32) {
-    let (hw_w, hw_h) = fb::dimensions().unwrap_or((640, 400));
-    // Clamp backbuffer dimensions so compositing stays snappy in headless or VGA modes
-    let w = hw_w.clamp(320, 800);
-    let h = hw_h.clamp(240, 500);
+    let (hw_w, hw_h) = fb::dimensions().unwrap_or((800, 500));
+    let w = hw_w.clamp(320, 1280);
+    let h = hw_h.clamp(240, 800);
+    fb::set_gui_active(true);
 
     let mut comp = COMPOSITOR.lock();
     comp.init(w, h);
 
+    let left_w = ((w * 48) / 100).max(320);
+    let right_x = left_w + 32;
+    let right_w = w.saturating_sub(right_x + 20).max(280);
+    let top_h = ((h * 52) / 100).max(190);
+    let bot_y = top_h + 54;
+    let bot_h = h.saturating_sub(bot_y + 18).max(130);
+
     // Window 1: AetherTerminal (/bin/aethersh)
     let w_term = comp.create_window(
-        "AetherTerminal - /bin/aethersh (PID 13)",
-        Rect::new(16, 40, 360, 190),
+        "AetherTerminal - /bin/aethersh (Interactive Console)",
+        Rect::new(16, 40, left_w, top_h),
         0x000F_172A,
     );
     comp.write_window_line(w_term, "aether@aetheros:~$ uname -a");
@@ -443,7 +412,7 @@ pub fn init_desktop() -> (usize, usize, u32) {
     // Window 2: System Monitor
     let w_mon = comp.create_window(
         "AetherOS System Monitor (/proc)",
-        Rect::new(392, 48, 360, 175),
+        Rect::new(right_x, 46, right_w, top_h.saturating_sub(12)),
         0x001E_293B,
     );
     let pmm_stats = crate::mm::pmm::stats();
@@ -470,7 +439,7 @@ pub fn init_desktop() -> (usize, usize, u32) {
     // Window 3: AetherFS & Security Audit Inspector
     let w_sec = comp.create_window(
         "AetherFS 1PiB & UUID Security Audit",
-        Rect::new(110, 242, 520, 140),
+        Rect::new(40, bot_y, w.saturating_sub(80), bot_h),
         0x0017_2033,
     );
     comp.write_window_line(
@@ -496,9 +465,55 @@ pub fn init_desktop() -> (usize, usize, u32) {
         button: 1,
     });
     comp.dispatch_event(GuiEvent::KeyPress(b'#'));
-    comp.dispatch_event(GuiEvent::FocusWindow(w_mon));
+    comp.dispatch_event(GuiEvent::FocusWindow(w_term));
     let crc = comp.composite_frame();
     (w, h, crc)
+}
+
+/// Mirror interactive `/dev/console` output into the `AetherTerminal` window and refresh the display.
+pub fn append_terminal_output(text: &str) {
+    let mut comp = COMPOSITOR.lock();
+    if comp.width == 0 || comp.windows.is_empty() {
+        return;
+    }
+    let max_lines = (comp.windows[0].rect.h.saturating_sub(36) / 12).max(6);
+    let mut should_composite = false;
+    {
+        let win = &mut comp.windows[0];
+        if win.lines.is_empty() {
+            win.lines.push(String::new());
+        }
+        for b in text.bytes() {
+            match b {
+                b'\n' => {
+                    win.lines.push(String::new());
+                    while win.lines.len() > max_lines {
+                        win.lines.remove(0);
+                    }
+                    should_composite = true;
+                }
+                b'\r' => {}
+                0x08 | 0x7F => {
+                    if let Some(last) = win.lines.last_mut() {
+                        last.pop();
+                    }
+                    should_composite = true;
+                }
+                ch if (0x20..=0x7E).contains(&ch) => {
+                    if let Some(last) = win.lines.last_mut() {
+                        last.push(ch as char);
+                    }
+                    if ch == b'$' || ch == b'#' || text.len() == 1 {
+                        should_composite = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if should_composite {
+        comp.composite_frame();
+    }
 }
 
 pub fn format_proc_gui() -> String {

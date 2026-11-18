@@ -6,9 +6,36 @@ export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 
 IMG_PATH="${AETHEROS_IMG:-$ROOT_DIR/build/aetheros.img}"
 BOOT_MODE="${AETHEROS_BOOT_MODE:-uefi}"
-MEMORY="${AETHEROS_MEM:-256M}"
+MEMORY="${AETHEROS_MEM:-512M}"
 CPUS="${AETHEROS_CPUS:-2}"
-DISPLAY_MODE="${AETHEROS_DISPLAY:-none}"
+if [[ -n "${AETHEROS_DISPLAY:-}" ]]; then
+    DISPLAY_MODE="$AETHEROS_DISPLAY"
+elif [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
+    DISPLAY_MODE="sdl"
+else
+    DISPLAY_MODE="none"
+fi
+
+EXTRA_ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --gui)
+            DISPLAY_MODE="sdl"
+            ;;
+        --headless)
+            DISPLAY_MODE="none"
+            ;;
+        --bios)
+            BOOT_MODE="bios"
+            ;;
+        --uefi)
+            BOOT_MODE="uefi"
+            ;;
+        *)
+            EXTRA_ARGS+=("$arg")
+            ;;
+    esac
+done
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "ERROR: qemu-system-x86_64 not found in PATH" >&2
@@ -36,6 +63,8 @@ fi
 
 if [[ "$DISPLAY_MODE" == "none" ]]; then
     QEMU_ARGS+=(-display none)
+else
+    QEMU_ARGS+=(-display "$DISPLAY_MODE")
 fi
 
 if [[ "$BOOT_MODE" == "uefi" ]]; then
@@ -81,4 +110,4 @@ if [[ -n "${AETHEROS_DISK:-}" && -f "${AETHEROS_DISK:-}" ]]; then
     QEMU_ARGS+=(-drive "file=$AETHEROS_DISK,format=raw,if=virtio")
 fi
 
-exec qemu-system-x86_64 "${QEMU_ARGS[@]}" "$@"
+exec qemu-system-x86_64 "${QEMU_ARGS[@]}" "${EXTRA_ARGS[@]}"
