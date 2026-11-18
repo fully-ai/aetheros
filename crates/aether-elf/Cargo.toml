@@ -1,0 +1,18 @@
+[package]
+name = "aether-elf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Strict, fuzz-tested, no_std x86_64 ELF64 executable parser and validator for AetherOS"
+
+[dependencies]
+aether-abi = { path = "../aether-abi", default-features = false }
+
+[features]
+default = []
+std = []
+
+[lints]
+workspace = true

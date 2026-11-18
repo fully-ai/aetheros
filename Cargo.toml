@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/aether-abi",
     "crates/aether-uuid",
+    "crates/aether-fs-core",
+    "crates/aether-elf",
 ]
 exclude = [
     "kernel",

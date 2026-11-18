@@ -9,10 +9,13 @@ extern crate alloc;
 pub mod arch;
 pub mod boot;
 pub mod drivers;
+pub mod fs;
+pub mod ipc;
 pub mod log;
 pub mod mm;
 pub mod panic;
 pub mod sched;
+pub mod security;
 pub mod selftest;
 pub mod sync;
 pub mod syscall;
@@ -169,7 +172,21 @@ pub extern "C" fn _start() -> ! {
         heap_stats.free_bytes / 1024
     );
 
-    // Stage 10: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
+    // Stage 10: Initialize Multi-User UUID Identity DB, VFS Hierarchy, initramfs, and AetherFS Volume
+    security::init(boot_info.cmdline);
+    let (aetherfs_uuid, aetherfs_blocks) = match fs::aetherfs::init() {
+        Ok(info) => info,
+        Err(err) => panic!("AetherFS volume initialization failed: {:?}", err),
+    };
+    fs::init(boot_info.initramfs);
+    kinfo!(
+        "VFS & AetherFS v1 ready: vol_uuid={} capacity={} PiB ({} blocks of 4 KiB)",
+        aetherfs_uuid,
+        (aetherfs_blocks * 4096) / (1u64 << 50),
+        aetherfs_blocks
+    );
+
+    // Stage 11: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
     if let Err(err) = sched::init() {
         panic!("Preemptive Scheduler init failed: {}", err);
     }
@@ -182,9 +199,9 @@ pub extern "C" fn _start() -> ! {
         sched::stats().total_tasks
     );
 
-    // Stage 11: Run automated kernel self-tests when requested via kernel command line
+    // Stage 12: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    kinfo!("Milestone 3 kernel initialization complete. Entering idle halt loop.");
+    kinfo!("Kernel initialization complete. Entering idle halt loop.");
     arch::x86_64::halt_loop()
 }

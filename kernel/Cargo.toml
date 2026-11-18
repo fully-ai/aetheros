@@ -14,6 +14,8 @@ bench = false
 [dependencies]
 aether-abi = { path = "../crates/aether-abi", default-features = false }
 aether-uuid = { path = "../crates/aether-uuid", default-features = false }
+aether-fs-core = { path = "../crates/aether-fs-core", default-features = false }
+aether-elf = { path = "../crates/aether-elf", default-features = false }
 
 [profile.dev]
 panic = "abort"

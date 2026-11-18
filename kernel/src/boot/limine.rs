@@ -314,7 +314,7 @@ pub static STACK_SIZE_REQUEST: LimineStackSizeRequest = LimineStackSizeRequest {
     ],
     revision: 0,
     response: core::ptr::null(),
-    stack_size: 64 * 1024, // 64 KiB initial kernel stack
+    stack_size: 256 * 1024, // 256 KiB initial kernel stack
 };
 
 #[used]

@@ -51,7 +51,20 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     test_ring3_syscalls_fork_and_pointer_validation();
     test_ring3_fault_isolation();
 
-    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 4 KERNEL TESTS PASSED");
+    // Milestone 5 tests (IPC: Pipes, Unix-Domain Sockets, Shared Memory)
+    test_ipc_pipes_unix_sockets_and_shm();
+
+    // Milestone 6 tests (VFS, /dev, /proc, /tmp sticky bit, symlinks, initramfs)
+    test_vfs_hierarchy_devices_and_proc();
+
+    // Milestone 7 tests (AetherFS: 1 PiB sparse file, Superblock failover, WAL Journal recovery)
+    test_aetherfs_1pib_and_crash_recovery();
+
+    // Milestone 8 & 10 tests (ELF64 Loader, Multi-User Security, UUID ACLs, execute_as_uuid, Sudo)
+    test_elf64_loader_and_ring3_execution();
+    test_multiuser_permissions_acl_and_execute_as();
+
+    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 10 KERNEL TESTS PASSED");
     // Exit code 0x10 -> QEMU exit status ((0x10 << 1) | 1) = 33 (PASS)
     qemu_debug_exit(0x10);
 }
@@ -763,5 +776,329 @@ fn test_ring3_fault_isolation() {
         "[TEST PASS] ring3_fault_isolation (kread_exit={}, priv_cli_exit={})",
         code1,
         code2
+    );
+}
+
+fn test_ipc_pipes_unix_sockets_and_shm() {
+    use crate::ipc::{self, Pipe, UnixSocket, SOCK_STREAM};
+    use aether_abi::open_flags::{O_CREAT, O_RDWR};
+    use aether_abi::Errno;
+
+    // 1. Anonymous pipe read/write, EOF on writer drop, EPIPE on reader drop
+    let (r, w) = Pipe::new_pair();
+    let msg = b"AetherOS-IPC-Pipe-Message";
+    assert_eq!(w.inner.write(msg, false), Ok(msg.len()));
+    let mut rbuf = [0u8; 32];
+    assert_eq!(r.inner.read(&mut rbuf, false), Ok(msg.len()));
+    assert_eq!(&rbuf[..msg.len()], msg);
+
+    drop(w);
+    // Reading after all writers closed must return Ok(0) (EOF)
+    assert_eq!(r.inner.read(&mut rbuf, false), Ok(0));
+
+    let (r2, w2) = Pipe::new_pair();
+    drop(r2);
+    // Writing after all readers closed must return Err(Errno::Epipe)
+    assert_eq!(w2.inner.write(b"broken", true), Err(Errno::Epipe));
+
+    // 2. Unix-domain stream socket bind/listen/connect/accept/read/write
+    let server_sock = UnixSocket::new(SOCK_STREAM).expect("server UnixSocket");
+    server_sock
+        .bind(String::from("/run/test_ipc.sock"))
+        .expect("bind");
+    server_sock.listen(8).expect("listen");
+
+    let client_sock = UnixSocket::new(SOCK_STREAM).expect("client UnixSocket");
+    client_sock.connect("/run/test_ipc.sock").expect("connect");
+    let accepted_sock = server_sock.accept(true).expect("accept");
+
+    assert_eq!(client_sock.write(b"ping-unix", true), Ok(9));
+    let mut sbuf = [0u8; 16];
+    assert_eq!(accepted_sock.read(&mut sbuf, true), Ok(9));
+    assert_eq!(&sbuf[..9], b"ping-unix");
+
+    assert_eq!(accepted_sock.write(b"pong-unix", true), Ok(9));
+    assert_eq!(client_sock.read(&mut sbuf, true), Ok(9));
+    assert_eq!(&sbuf[..9], b"pong-unix");
+
+    // 3. Shared memory object creation, page backing, and unlink
+    let shm =
+        ipc::shm_open_object("/aether_test_shm", O_CREAT | O_RDWR, 0o600).expect("shm_open_object");
+    let frames = shm.ensure_pages(2).expect("shm ensure_pages(2)");
+    assert_eq!(frames.len(), 2);
+    unsafe {
+        *pmm::phys_to_virt(frames[0]) = 0x7E;
+    }
+    let shm_reopen =
+        ipc::shm_open_object("/aether_test_shm", O_RDWR, 0).expect("reopen existing shm");
+    let frames2 = shm_reopen.ensure_pages(2).unwrap();
+    assert_eq!(frames2[0], frames[0]);
+    ipc::shm_unlink_object("/aether_test_shm").expect("shm_unlink_object");
+
+    crate::kinfo!("[TEST PASS] ipc_pipes_unix_sockets_and_shm");
+}
+
+fn test_vfs_hierarchy_devices_and_proc() {
+    use crate::fs;
+    use aether_abi::open_flags::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC};
+
+    // 1. Verify initramfs /etc/os-release was unpacked into VFS
+    let os_rel = fs::vfs_open("/etc/os-release", O_RDONLY, 0).expect("open /etc/os-release");
+    let mut buf = [0u8; 256];
+    let n = fs::vfs_read_file(&os_rel, &mut buf, None).expect("read /etc/os-release");
+    let os_str = core::str::from_utf8(&buf[..n]).unwrap();
+    assert!(
+        os_str.contains("NAME=\"AetherOS\""),
+        "/etc/os-release missing expected banner"
+    );
+
+    // 2. Verify /dev/null, /dev/zero, /dev/urandom
+    let dev_null = fs::vfs_open("/dev/null", O_RDWR, 0).expect("open /dev/null");
+    assert_eq!(fs::vfs_write_file(&dev_null, b"discarded", None), Ok(9));
+    assert_eq!(fs::vfs_read_file(&dev_null, &mut buf[..16], None), Ok(0));
+
+    let dev_zero = fs::vfs_open("/dev/zero", O_RDONLY, 0).expect("open /dev/zero");
+    let mut zbuf = [0xAAu8; 32];
+    assert_eq!(fs::vfs_read_file(&dev_zero, &mut zbuf, None), Ok(32));
+    assert_eq!(zbuf, [0u8; 32]);
+
+    let dev_urandom = fs::vfs_open("/dev/urandom", O_RDONLY, 0).expect("open /dev/urandom");
+    let mut r1 = [0u8; 16];
+    let mut r2 = [0u8; 16];
+    assert_eq!(fs::vfs_read_file(&dev_urandom, &mut r1, None), Ok(16));
+    assert_eq!(fs::vfs_read_file(&dev_urandom, &mut r2, None), Ok(16));
+    assert_ne!(r1, r2, "/dev/urandom must produce non-repeating entropy");
+
+    // 3. Verify /proc/version and /proc/meminfo
+    let proc_ver = fs::vfs_open("/proc/version", O_RDONLY, 0).expect("open /proc/version");
+    let nv = fs::vfs_read_file(&proc_ver, &mut buf, None).expect("read /proc/version");
+    assert!(core::str::from_utf8(&buf[..nv])
+        .unwrap()
+        .contains("AetherOS"));
+
+    // 4. Create file, write, symlink, read through symlink, unlink
+    let f = fs::vfs_open("/tmp/vfs_test.txt", O_CREAT | O_RDWR | O_TRUNC, 0o644)
+        .expect("create /tmp/vfs_test.txt");
+    assert_eq!(fs::vfs_write_file(&f, b"VFS-Content-OK", None), Ok(14));
+    fs::vfs_symlink("/tmp/vfs_test.txt", "/tmp/vfs_link.txt").expect("vfs_symlink");
+    assert_eq!(
+        fs::vfs_readlink("/tmp/vfs_link.txt").as_deref(),
+        Ok("/tmp/vfs_test.txt")
+    );
+    let lf = fs::vfs_open("/tmp/vfs_link.txt", O_RDONLY, 0).expect("open symlink");
+    let nl = fs::vfs_read_file(&lf, &mut buf, None).expect("read via symlink");
+    assert_eq!(&buf[..nl], b"VFS-Content-OK");
+
+    fs::vfs_unlink("/tmp/vfs_link.txt").expect("unlink symlink");
+    fs::vfs_unlink("/tmp/vfs_test.txt").expect("unlink file");
+
+    crate::kinfo!("[TEST PASS] vfs_hierarchy_devices_and_proc");
+}
+
+fn test_aetherfs_1pib_and_crash_recovery() {
+    crate::fs::aetherfs::run_aetherfs_self_tests()
+        .expect("AetherFS 1 PiB sparse + superblock failover + WAL journal crash recovery test");
+    crate::kinfo!(
+        "[TEST PASS] aetherfs_1pib_and_crash_recovery (1 PiB sparse + SB failover + WAL replay)"
+    );
+}
+
+fn test_elf64_loader_and_ring3_execution() {
+    use crate::fs;
+    use aether_abi::open_flags::{O_CREAT, O_RDWR, O_TRUNC};
+    use aether_elf::{build_minimal_elf64_image, parse_and_validate_elf64, ElfError};
+
+    // Build a real x86_64 ELF64 binary whose `_start` checks `argc == 3` (`rdi == 3`),
+    // and exits with `sys_exit(55)` (`rax=70, rdi=55`) if `argc == 3`, else `sys_exit(1)`.
+    // Machine code:
+    //   48 83 ff 03             cmp rdi, 3
+    //   75 09                   jne 1f
+    //   b8 46 00 00 00          mov eax, 70
+    //   bf 37 00 00 00          mov edi, 55
+    //   0f 05                   syscall
+    // 1:
+    //   b8 46 00 00 00          mov eax, 70
+    //   bf 01 00 00 00          mov edi, 1
+    //   0f 05                   syscall
+    let elf_code: [u8; 28] = [
+        0x48, 0x83, 0xFF, 0x03, 0x75, 0x0C, 0xB8, 0x46, 0x00, 0x00, 0x00, 0xBF, 0x37, 0x00, 0x00,
+        0x00, 0x0F, 0x05, 0xB8, 0x46, 0x00, 0x00, 0x00, 0xBF, 0x01, 0x00, 0x00, 0x0F,
+    ];
+    let mut full_code = Vec::from(&elf_code[..]);
+    full_code.push(0x05);
+
+    let mut elf_buf = alloc::vec![0u8; 4096 + 64];
+    let elf_len = build_minimal_elf64_image(&full_code, &mut elf_buf);
+
+    // Verify malformed ELF targeting kernel memory is rejected
+    let mut bad_elf = elf_buf[..elf_len].to_vec();
+    bad_elf[24..32].copy_from_slice(&0xFFFF_FFFF_8000_0000u64.to_le_bytes());
+    bad_elf[64 + 16..64 + 24].copy_from_slice(&0xFFFF_FFFF_8000_0000u64.to_le_bytes());
+    assert_eq!(
+        parse_and_validate_elf64(&bad_elf),
+        Err(ElfError::KernelOrNullAddressTarget)
+    );
+
+    // Write valid ELF64 executable into `/bin/test_elf` in VFS with mode 0o755
+    let f = fs::vfs_open("/bin/test_elf", O_CREAT | O_RDWR | O_TRUNC, 0o755)
+        .expect("create /bin/test_elf");
+    fs::vfs_write_file(&f, &elf_buf[..elf_len], None).expect("write /bin/test_elf");
+
+    let argv = alloc::vec![
+        String::from("/bin/test_elf"),
+        String::from("--flag"),
+        String::from("aether"),
+    ];
+    let envp = alloc::vec![String::from("PATH=/bin:/sbin"), String::from("USER=root")];
+
+    let pid = sched::exec::spawn_elf_process_from_vfs(
+        "/bin/test_elf",
+        &argv,
+        &envp,
+        Credentials::root(),
+        None,
+    )
+    .expect("spawn_elf_process_from_vfs");
+    let exit_code = sched::wait_tid(pid).expect("wait_tid(/bin/test_elf)");
+    assert_eq!(
+        exit_code, 55,
+        "ELF64 Ring 3 binary must verify argc==3 and exit with 55"
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] elf64_loader_and_ring3_execution (pid={}, argc=3, exit_code={})",
+        pid,
+        exit_code
+    );
+}
+
+fn test_multiuser_permissions_acl_and_execute_as() {
+    use crate::fs::{self, AclEntry, MS_NOSUID};
+    use crate::security;
+    use aether_abi::open_flags::{O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+    use aether_abi::Errno;
+    use aether_uuid::Uuid;
+
+    // 1. Root creates a protected file `/etc/secret.conf` (mode 0o600) and a sticky `/tmp/root_note`
+    let f = fs::vfs_open("/etc/secret.conf", O_CREAT | O_RDWR | O_TRUNC, 0o600)
+        .expect("create /etc/secret.conf");
+    fs::vfs_write_file(&f, b"root-only-secret", None).unwrap();
+
+    let tf = fs::vfs_open("/tmp/root_sticky_file", O_CREAT | O_RDWR | O_TRUNC, 0o644)
+        .expect("create /tmp/root_sticky_file");
+    fs::vfs_write_file(&tf, b"sticky-protected", None).unwrap();
+
+    // 2. Root sets `execute_as_uuid = ROOT_USER` on `/bin/test_elf`
+    fs::vfs_set_execute_as("/bin/test_elf", Uuid::ROOT_USER).expect("root set execute_as_uuid");
+    assert_eq!(fs::vfs_get_execute_as("/bin/test_elf"), Ok(Uuid::ROOT_USER));
+    // Setting a bogus/deleted UUID must be rejected with Errno::Einval!
+    let bogus_uuid = Uuid::deterministic(0xDEAD, 0xBEEF);
+    assert_eq!(
+        fs::vfs_set_execute_as("/bin/test_elf", bogus_uuid),
+        Err(Errno::Einval),
+        "bogus execute_as_uuid must be rejected"
+    );
+
+    // 3. Temporarily switch current task credentials to unprivileged user `aether` (UID 1000)
+    let saved_root_creds = sched::with_current_task(|t| t.creds.clone());
+    let unpriv_creds = security::aether_user_credentials();
+    sched::with_current_task_mut(|t| t.creds = unpriv_creds.clone());
+
+    // 3a. Unprivileged user MUST be denied reading/writing `/etc/secret.conf` (0o600)
+    assert_eq!(
+        fs::vfs_open("/etc/secret.conf", O_RDONLY, 0).err(),
+        Some(Errno::Eacces)
+    );
+    assert_eq!(
+        fs::vfs_open("/etc/secret.conf", O_WRONLY, 0).err(),
+        Some(Errno::Eacces)
+    );
+
+    // 3b. Unprivileged user MUST be denied deleting root's file in sticky `/tmp` (0o1777)
+    assert_eq!(
+        fs::vfs_unlink("/tmp/root_sticky_file"),
+        Err(Errno::Eperm),
+        "sticky bit on /tmp must block non-owner unlink"
+    );
+
+    // 3c. Unprivileged user MUST be denied modifying `execute_as_uuid`!
+    assert_eq!(
+        fs::vfs_set_execute_as("/bin/test_elf", Uuid::ROOT_USER),
+        Err(Errno::Eperm),
+        "unprivileged user must never be allowed to set execute_as_uuid"
+    );
+
+    // 3d. Verify `execute_as_uuid` credential transition when `aether` (UID 1000) runs `/bin/test_elf`:
+    let (_, elf_node, mount_flags) =
+        fs::vfs_read_executable_and_meta("/bin/test_elf", &unpriv_creds).unwrap();
+    let transitioned =
+        security::compute_exec_credentials(&unpriv_creds, &elf_node, mount_flags, "/bin/test_elf")
+            .expect("compute_exec_credentials");
+    assert_eq!(
+        transitioned.euid, 0,
+        "execute_as_uuid must transition euid to 0"
+    );
+    assert_eq!(transitioned.user_uuid, Uuid::ROOT_USER);
+
+    // 3e. Verify `MS_NOSUID` and `no_new_privs` block `execute_as_uuid` elevation!
+    assert_eq!(
+        security::compute_exec_credentials(&unpriv_creds, &elf_node, MS_NOSUID, "/bin/test_elf")
+            .err(),
+        Some(Errno::Eperm)
+    );
+    let mut nnp_creds = unpriv_creds.clone();
+    nnp_creds.no_new_privs = true;
+    assert_eq!(
+        security::compute_exec_credentials(&nnp_creds, &elf_node, 0, "/bin/test_elf").err(),
+        Some(Errno::Eperm)
+    );
+
+    // 4. Restore root credentials, grant `aether` read access to `/etc/secret.conf` via UUID ACL!
+    sched::with_current_task_mut(|t| t.creds = saved_root_creds.clone());
+    let acl = alloc::vec![AclEntry {
+        subject_uuid: *security::AETHER_USER_UUID.as_bytes(),
+        is_group: 0,
+        allow_rwx: 4, // Read allowed for AETHER_USER_UUID
+        deny_rwx: 0,
+        _pad: 0,
+    }];
+    fs::vfs_set_acl("/etc/secret.conf", acl).expect("vfs_set_acl");
+
+    // Switch back to `aether` (UID 1000): read MUST now succeed via UUID ACL, while write MUST still fail!
+    sched::with_current_task_mut(|t| t.creds = unpriv_creds);
+    let rf = fs::vfs_open("/etc/secret.conf", O_RDONLY, 0)
+        .expect("UUID ACL must grant read access to aether");
+    let mut sbuf = [0u8; 32];
+    let nr = fs::vfs_read_file(&rf, &mut sbuf, None).unwrap();
+    assert_eq!(&sbuf[..nr], b"root-only-secret");
+    assert_eq!(
+        fs::vfs_open("/etc/secret.conf", O_WRONLY, 0).err(),
+        Some(Errno::Eacces),
+        "UUID ACL granted read only; write must still be denied"
+    );
+
+    // 5. Test kernel-controlled sudo development mode elevation for `%wheel` member `aether`
+    security::sys_elevate_sudo_current("selftest-sudo-check")
+        .expect("wheel member sudo dev elevation");
+    assert_eq!(sched::with_current_task(|t| t.creds.euid), 0);
+
+    // Restore root credentials and clean up test files
+    sched::with_current_task_mut(|t| t.creds = saved_root_creds);
+    fs::vfs_set_execute_as("/bin/test_elf", Uuid::NIL).unwrap();
+    fs::vfs_unlink("/tmp/root_sticky_file").unwrap();
+
+    // 6. Test AetherFS persistence across simulated reboot (`remount_and_recover`)
+    let report = fs::aetherfs::remount_and_recover().expect("remount_and_recover");
+    let persisted_acl = fs::vfs_get_acl("/etc/secret.conf").expect("persisted ACL");
+    assert_eq!(persisted_acl.len(), 1);
+    assert_eq!(
+        persisted_acl[0].subject_uuid,
+        *security::AETHER_USER_UUID.as_bytes()
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] multiuser_permissions_acl_and_execute_as (acl_entries={}, recovery_replayed={})",
+        persisted_acl.len(),
+        report.replayed_journal_tx
     );
 }

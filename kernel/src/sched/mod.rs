@@ -4,10 +4,14 @@
 //! - Timer-driven preemptive priority round-robin scheduling (1000 Hz PIT tick on vector 32).
 //! - Software yield/block trap on vector `0x81` (`129`) using the uniform `TrapFrame` mechanism.
 //! - Kernel threads and isolated Ring 3 user processes.
+//! - Per-process File Descriptor Table (`fds`) supporting VFS files, pipes, sockets, and shm.
 //! - Sleeping (`sleep_ms`), blocking (`WaitQueue`), wake-up, exit codes, and `waitpid` reaping.
 //! - Dedicated priority-0 idle thread (`idle/0`) ensuring the run queue is never empty.
 
+pub mod exec;
+
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::asm;
 use core::mem::size_of;
@@ -21,6 +25,7 @@ use aether_uuid::Uuid;
 use crate::arch::x86_64::idt::{self, TrapFrame};
 use crate::arch::x86_64::paging::{PTE_NO_EXECUTE, PTE_PRESENT, PTE_USER, PTE_WRITABLE};
 use crate::arch::x86_64::{gdt, hlt, percpu, sti, timer};
+use crate::fs::{default_stdio_fds, FileDescriptorEntry, OpenFile};
 use crate::mm::pmm;
 use crate::mm::vmm::{self, AddressSpace};
 use crate::mm::PAGE_SIZE;
@@ -36,7 +41,7 @@ pub const PRIORITY_HIGH: u8 = 24;
 pub const PRIORITY_REALTIME: u8 = 31;
 
 pub const DEFAULT_QUANTUM_TICKS: u32 = 5; // 5 ms default time slice at 1000 Hz
-const KERNEL_STACK_PAGES: usize = 4; // 16 KiB + 4 KiB guard page
+const KERNEL_STACK_PAGES: usize = 16; // 64 KiB + 4 KiB guard page
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
@@ -116,8 +121,11 @@ pub struct Task {
     pub user_mmap_next: u64,
     pub cwd: String,
     pub creds: Credentials,
+    pub fds: Vec<Option<FileDescriptorEntry>>,
     pub pending_signals: u64,
 }
+
+pub const MAX_FDS_PER_PROCESS: usize = 64;
 
 impl Task {
     pub fn set_name(&mut self, s: &str) {
@@ -130,6 +138,50 @@ impl Task {
     pub fn name_str(&self) -> &str {
         let len = self.name.iter().position(|&b| b == 0).unwrap_or(32);
         core::str::from_utf8(&self.name[..len]).unwrap_or("?")
+    }
+
+    pub fn alloc_fd(&mut self, file: Arc<OpenFile>, cloexec: bool) -> Result<u32, Errno> {
+        for (idx, slot) in self.fds.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(FileDescriptorEntry { file, cloexec });
+                return Ok(idx as u32);
+            }
+        }
+        if self.fds.len() >= MAX_FDS_PER_PROCESS {
+            return Err(Errno::Emfile);
+        }
+        let idx = self.fds.len();
+        self.fds.push(Some(FileDescriptorEntry { file, cloexec }));
+        Ok(idx as u32)
+    }
+
+    pub fn get_fd(&self, fd: u32) -> Result<Arc<OpenFile>, Errno> {
+        let idx = fd as usize;
+        self.fds
+            .get(idx)
+            .and_then(|s| s.as_ref())
+            .map(|e| Arc::clone(&e.file))
+            .ok_or(Errno::Ebadf)
+    }
+
+    pub fn close_fd(&mut self, fd: u32) -> Result<(), Errno> {
+        let idx = fd as usize;
+        let slot = self.fds.get_mut(idx).ok_or(Errno::Ebadf)?;
+        if slot.take().is_some() {
+            Ok(())
+        } else {
+            Err(Errno::Ebadf)
+        }
+    }
+
+    pub fn close_cloexec_fds(&mut self) {
+        for slot in &mut self.fds {
+            if let Some(entry) = slot {
+                if entry.cloexec {
+                    *slot = None;
+                }
+            }
+        }
     }
 }
 
@@ -367,6 +419,7 @@ pub fn init() -> Result<(), &'static str> {
         user_mmap_next: 0x0000_4000_0000_0000,
         cwd: String::from("/"),
         creds: Credentials::root(),
+        fds: default_stdio_fds(),
         pending_signals: 0,
     };
     boot_task.set_name("kthreadd/boot");
@@ -449,6 +502,7 @@ pub fn spawn_kernel_thread(
         user_mmap_next: 0x0000_4000_0000_0000,
         cwd: String::from("/"),
         creds: Credentials::root(),
+        fds: default_stdio_fds(),
         pending_signals: 0,
     };
     task.set_name(name);
@@ -537,6 +591,7 @@ pub fn exit_current(exit_code: i32) -> ! {
     {
         let mut sched = SCHED.lock();
         let cur = sched.current_idx;
+        sched.tasks[cur].fds.clear();
         sched.tasks[cur].state = TaskState::Zombie { exit_code };
     }
     yield_now();
@@ -628,6 +683,7 @@ fn on_user_fault_terminate(frame: &mut TrapFrame) -> *mut TrapFrame {
         frame.rip,
         exit_code
     );
+    sched.tasks[cur].fds.clear();
     sched.tasks[cur].state = TaskState::Zombie { exit_code };
     sched.schedule_from_isr(frame, false)
 }
@@ -636,6 +692,7 @@ fn on_user_fault_terminate(frame: &mut TrapFrame) -> *mut TrapFrame {
 pub fn exit_current_from_frame(frame: &mut TrapFrame, exit_code: i32) -> *mut TrapFrame {
     let mut sched = SCHED.lock();
     let cur = sched.current_idx;
+    sched.tasks[cur].fds.clear();
     sched.tasks[cur].state = TaskState::Zombie { exit_code };
     sched.schedule_from_isr(frame, false)
 }
@@ -764,6 +821,7 @@ pub fn spawn_user_code_process(
         user_mmap_next: 0x0000_4000_0000_0000,
         cwd: String::from("/"),
         creds,
+        fds: default_stdio_fds(),
         pending_signals: 0,
     };
     task.set_name(name);
@@ -785,6 +843,7 @@ pub fn fork_current_from_frame(parent_frame: &TrapFrame) -> Result<u32, Errno> {
         parent_mmap,
         parent_cwd,
         parent_creds,
+        parent_fds,
     ) = {
         let sched = SCHED.lock();
         let cur = &sched.tasks[sched.current_idx];
@@ -801,6 +860,7 @@ pub fn fork_current_from_frame(parent_frame: &TrapFrame) -> Result<u32, Errno> {
             cur.user_mmap_next,
             cur.cwd.clone(),
             cur.creds.clone(),
+            cur.fds.clone(),
         )
     };
 
@@ -837,6 +897,7 @@ pub fn fork_current_from_frame(parent_frame: &TrapFrame) -> Result<u32, Errno> {
         user_mmap_next: parent_mmap,
         cwd: parent_cwd,
         creds: parent_creds,
+        fds: parent_fds,
         pending_signals: 0,
     };
 

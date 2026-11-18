@@ -1,0 +1,18 @@
+[package]
+name = "aether-fs-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AetherFS v1 native 64-bit extent-based journaling filesystem engine with 1 PiB+ capacity, CRC32C checksums, UUID ACLs, and execute_as_uuid metadata"
+
+[dependencies]
+aether-uuid = { path = "../aether-uuid", default-features = false }
+
+[features]
+default = []
+std = []
+
+[lints]
+workspace = true
