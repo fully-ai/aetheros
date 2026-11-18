@@ -395,6 +395,84 @@ impl BitmapAllocator {
 
 static PMM: IrqSpinLock<BitmapAllocator> = IrqSpinLock::new(BitmapAllocator::new());
 
+const MAX_SHARED_FRAMES: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct SharedFrameEntry {
+    phys: u64,
+    refs: u32,
+}
+
+struct SharedRefTable {
+    entries: [SharedFrameEntry; MAX_SHARED_FRAMES],
+}
+
+impl SharedRefTable {
+    const fn new() -> Self {
+        Self {
+            entries: [SharedFrameEntry { phys: 0, refs: 0 }; MAX_SHARED_FRAMES],
+        }
+    }
+
+    fn get_refs(&self, phys: u64) -> u32 {
+        if phys == 0 {
+            return 0;
+        }
+        for e in &self.entries {
+            if e.phys == phys {
+                return e.refs;
+            }
+        }
+        1
+    }
+
+    fn inc_ref(&mut self, phys: u64) -> u32 {
+        for e in &mut self.entries {
+            if e.phys == phys {
+                e.refs = e.refs.saturating_add(1);
+                return e.refs;
+            }
+        }
+        for e in &mut self.entries {
+            if e.phys == 0 {
+                e.phys = phys;
+                e.refs = 2;
+                return 2;
+            }
+        }
+        panic!("PMM: SharedRefTable capacity exhausted");
+    }
+
+    /// Decrement refcount if shared (`refs >= 2`). Returns `true` if the frame is still
+    /// referenced by at least one other mapping and therefore must NOT be freed in the bitmap yet.
+    fn dec_ref_should_keep(&mut self, phys: u64) -> bool {
+        for e in &mut self.entries {
+            if e.phys == phys {
+                if e.refs > 2 {
+                    e.refs -= 1;
+                    return true;
+                } else {
+                    // Drops from 2 -> 1 (unique owner again)
+                    e.phys = 0;
+                    e.refs = 0;
+                    return false;
+                }
+            }
+        }
+        false
+    }
+}
+
+static SHARED_REFS: IrqSpinLock<SharedRefTable> = IrqSpinLock::new(SharedRefTable::new());
+
+pub fn frame_refcount(phys: u64) -> u32 {
+    SHARED_REFS.lock().get_refs(phys)
+}
+
+pub fn inc_frame_ref(phys: u64) -> u32 {
+    SHARED_REFS.lock().inc_ref(phys)
+}
+
 pub fn init(boot: &BootInfo) -> Result<PmmStats, &'static str> {
     let mut alloc = PMM.lock();
     alloc.init(boot)?;
@@ -418,6 +496,12 @@ pub fn alloc_contiguous(count: usize) -> Result<u64, PmmError> {
 }
 
 pub fn free_frame(phys: u64) -> Result<(), PmmError> {
+    if (phys & (PAGE_SIZE as u64 - 1)) != 0 {
+        return Err(PmmError::UnalignedAddress);
+    }
+    if phys != 0 && SHARED_REFS.lock().dec_ref_should_keep(phys) {
+        return Ok(());
+    }
     PMM.lock().free_frame(phys)
 }
 

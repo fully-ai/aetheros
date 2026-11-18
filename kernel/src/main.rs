@@ -4,6 +4,8 @@
 
 //! AetherOS x86_64 Kernel Entry Point and Staged Initialization.
 
+extern crate alloc;
+
 pub mod arch;
 pub mod boot;
 pub mod drivers;
@@ -138,9 +140,31 @@ pub extern "C" fn _start() -> ! {
         kinfo!("ACPI RSDP handoff address: {:#018x}", rsdp);
     }
 
-    // Stage 8: Run automated kernel self-tests when requested via kernel command line
+    // Stage 8: Initialize Virtual Memory Manager (4-level paging, #PF demand/COW/guard handler)
+    let vmm_stats = match mm::vmm::init() {
+        Ok(stats) => stats,
+        Err(err) => panic!("Virtual Memory Manager init failed: {}", err),
+    };
+    kinfo!(
+        "VMM ready: kernel_pml4={:#010x} (4-level paging, W^X, Demand Paging, COW, Guard Pages)",
+        vmm_stats.kernel_pml4_phys
+    );
+
+    // Stage 9: Initialize Kernel Heap Allocator (`#[global_allocator]`, 2 MiB initial, up to 64 MiB)
+    let heap_stats = match mm::heap::init() {
+        Ok(stats) => stats,
+        Err(err) => panic!("Kernel Heap Allocator init failed: {}", err),
+    };
+    kinfo!(
+        "Kernel Heap ready: base={:#018x} mapped={} KiB free={} KiB",
+        mm::vmm::KERNEL_HEAP_BASE,
+        heap_stats.mapped_bytes / 1024,
+        heap_stats.free_bytes / 1024
+    );
+
+    // Stage 10: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    kinfo!("Milestone 1 kernel initialization complete. Entering idle halt loop.");
+    kinfo!("Milestone 2 kernel initialization complete. Entering idle halt loop.");
     arch::x86_64::halt_loop()
 }
