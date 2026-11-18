@@ -13,12 +13,17 @@ use core::arch::asm;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-use aether_abi::caps::CAP_ALL;
+use aether_abi::caps::{CAP_ALL, CAP_KILL, CAP_SETGID, CAP_SETUID};
+use aether_abi::signal::{SIGFPE, SIGILL, SIGKILL, SIGSEGV};
+use aether_abi::{Errno, ProcInfo};
 use aether_uuid::Uuid;
 
 use crate::arch::x86_64::idt::{self, TrapFrame};
-use crate::arch::x86_64::{gdt, hlt, sti, timer};
+use crate::arch::x86_64::paging::{PTE_NO_EXECUTE, PTE_PRESENT, PTE_USER, PTE_WRITABLE};
+use crate::arch::x86_64::{gdt, hlt, percpu, sti, timer};
+use crate::mm::pmm;
 use crate::mm::vmm::{self, AddressSpace};
+use crate::mm::PAGE_SIZE;
 use crate::sync::IrqSpinLock;
 
 /// Software interrupt vector used for voluntary yield / sleep / block transitions.
@@ -266,6 +271,7 @@ impl Scheduler {
             let next_aspace = self.tasks[next_idx].address_space;
             if next_stack_top != 0 {
                 gdt::set_kernel_stack(next_stack_top);
+                percpu::set_kernel_stack(next_stack_top);
             }
             next_aspace.activate();
         }
@@ -338,6 +344,7 @@ pub fn on_timer_tick(frame: &mut TrapFrame, now_tick: u64) -> *mut TrapFrame {
 /// and install the software yield trap handler on vector `0x81`.
 pub fn init() -> Result<(), &'static str> {
     idt::register_handler(SCHED_YIELD_VECTOR, on_yield_trap);
+    idt::register_user_fault_hook(on_user_fault_terminate);
 
     let boot_tid = alloc_tid(); // TID 1
     let mut boot_task = Task {
@@ -598,4 +605,397 @@ pub fn stats() -> SchedulerStats {
         context_switches: sched.total_context_switches,
         preemptions: sched.total_preemptions,
     }
+}
+
+/// Fatal user-mode exception hook installed in the IDT (Section 3.3).
+/// Terminates ONLY the offending Ring 3 user process with exit code `128 + signal`
+/// and immediately schedules the next runnable task without crashing the kernel.
+fn on_user_fault_terminate(frame: &mut TrapFrame) -> *mut TrapFrame {
+    let sig = match frame.vector {
+        0 | 16 | 19 => SIGFPE,
+        6 => SIGILL,
+        _ => SIGSEGV,
+    };
+    let exit_code = 128 + (sig as i32);
+    let mut sched = SCHED.lock();
+    let cur = sched.current_idx;
+    let pid = sched.tasks[cur].pid;
+    crate::kwarn!(
+        "Scheduler: terminating faulting user process PID={} ('{}') vec={} RIP={:#018x} exit_code={}",
+        pid,
+        sched.tasks[cur].name_str(),
+        frame.vector,
+        frame.rip,
+        exit_code
+    );
+    sched.tasks[cur].state = TaskState::Zombie { exit_code };
+    sched.schedule_from_isr(frame, false)
+}
+
+/// Terminate the currently executing task directly from an in-flight `TrapFrame` (e.g. `sys_exit`).
+pub fn exit_current_from_frame(frame: &mut TrapFrame, exit_code: i32) -> *mut TrapFrame {
+    let mut sched = SCHED.lock();
+    let cur = sched.current_idx;
+    sched.tasks[cur].state = TaskState::Zombie { exit_code };
+    sched.schedule_from_isr(frame, false)
+}
+
+/// Access or mutate the currently executing `Task` under the scheduler lock.
+pub fn with_current_task<R>(f: impl FnOnce(&Task) -> R) -> R {
+    let sched = SCHED.lock();
+    f(&sched.tasks[sched.current_idx])
+}
+
+pub fn with_current_task_mut<R>(f: impl FnOnce(&mut Task) -> R) -> R {
+    let mut sched = SCHED.lock();
+    let idx = sched.current_idx;
+    f(&mut sched.tasks[idx])
+}
+
+/// Spawn an isolated Ring 3 user process from position-independent machine code bytes.
+/// Maps:
+/// - Code at `0x0000_0000_0040_0000` (`PTE_PRESENT | PTE_USER`, RX, non-writable W^X!).
+/// - User stack at `0x0000_7FFF_FFFE_0000..0x0000_7FFF_FFFF_0000` (64 KiB, RW + NX + bottom guard page!).
+/// - User heap `brk` base at `0x0000_0000_0080_0000`.
+pub fn spawn_user_code_process(
+    name: &str,
+    code: &[u8],
+    creds: Credentials,
+) -> Result<u32, &'static str> {
+    if code.is_empty() || code.len() > PAGE_SIZE * 4 {
+        return Err("spawn_user_code_process: invalid code size");
+    }
+
+    let aspace = AddressSpace::new_user().map_err(|_| "failed to create user AddressSpace")?;
+
+    // 1. Map user code page(s) at 0x0000_0000_0040_0000 as RX (W^X enforced)
+    let code_base: u64 = 0x0000_0000_0040_0000;
+    let code_pages = code.len().div_ceil(PAGE_SIZE);
+    for i in 0..code_pages {
+        let phys = pmm::alloc_zeroed_frame().map_err(|_| "out of frames for user code")?;
+        let chunk_start = i * PAGE_SIZE;
+        let chunk_end = (chunk_start + PAGE_SIZE).min(code.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                code[chunk_start..chunk_end].as_ptr(),
+                pmm::phys_to_virt(phys),
+                chunk_end - chunk_start,
+            );
+        }
+        aspace
+            .map_page(
+                code_base + (i as u64) * (PAGE_SIZE as u64),
+                phys,
+                PTE_PRESENT | PTE_USER, // RX (not writable, executable)
+            )
+            .map_err(|_| "failed to map user code page")?;
+    }
+
+    // 2. Map user stack with bottom guard page + 4 pages (16 KiB) of RW+NX user stack
+    let stack_guard_vaddr: u64 = 0x0000_7FFF_FFFE_B000;
+    let stack_top_vaddr: u64 = 0x0000_7FFF_FFFF_0000;
+    aspace
+        .map_guard_page(stack_guard_vaddr)
+        .map_err(|_| "failed to map user stack guard page")?;
+    for i in 1..=4u64 {
+        let v = stack_guard_vaddr + i * (PAGE_SIZE as u64);
+        let phys = pmm::alloc_zeroed_frame().map_err(|_| "out of frames for user stack")?;
+        aspace
+            .map_page(
+                v,
+                phys,
+                PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NO_EXECUTE,
+            )
+            .map_err(|_| "failed to map user stack page")?;
+    }
+
+    // 3. Allocate guarded Ring 0 kernel stack for syscalls and interrupts
+    let kstack_top = vmm::alloc_guarded_kernel_stack(KERNEL_STACK_PAGES)
+        .map_err(|_| "failed to alloc user process kernel stack")?;
+    let frame_addr = (kstack_top - (size_of::<TrapFrame>() as u64)) & !0xF;
+    let frame_ptr = frame_addr as *mut TrapFrame;
+
+    unsafe {
+        frame_ptr.write(TrapFrame {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0x202,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rbp: 0,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            rcx: code_base,
+            rbx: 0,
+            rax: 0,
+            vector: SCHED_YIELD_VECTOR as u64,
+            error_code: 0,
+            rip: code_base,
+            cs: gdt::USER_CS as u64, // 0x2B (Ring 3!)
+            rflags: 0x202,           // IF=1
+            rsp: stack_top_vaddr - 16,
+            ss: gdt::USER_DS as u64, // 0x23 (Ring 3!)
+        });
+    }
+
+    let tid = alloc_tid();
+    let ppid = current_pid();
+    let mut task = Task {
+        tid,
+        pid: tid,
+        ppid,
+        name: [0; 32],
+        state: TaskState::Ready,
+        priority: PRIORITY_NORMAL,
+        quantum_ticks: DEFAULT_QUANTUM_TICKS,
+        remaining_ticks: DEFAULT_QUANTUM_TICKS,
+        cpu_ticks: 0,
+        context_switches: 0,
+        is_user: true,
+        address_space: aspace,
+        kernel_stack_top: kstack_top,
+        kernel_rsp: frame_addr,
+        user_brk_base: 0x0000_0000_0080_0000,
+        user_brk_current: 0x0000_0000_0080_0000,
+        user_mmap_next: 0x0000_4000_0000_0000,
+        cwd: String::from("/"),
+        creds,
+        pending_signals: 0,
+    };
+    task.set_name(name);
+
+    SCHED.lock().tasks.push(task);
+    Ok(tid)
+}
+
+/// Fork the currently executing user process (`sys_fork`) using Copy-on-Write (`clone_cow`).
+/// Returns `Ok(child_pid)` to the parent, while the child wakes in Ring 3 with `RAX = 0`.
+pub fn fork_current_from_frame(parent_frame: &TrapFrame) -> Result<u32, Errno> {
+    let (
+        parent_pid,
+        parent_name,
+        parent_prio,
+        parent_aspace,
+        parent_brk_base,
+        parent_brk_cur,
+        parent_mmap,
+        parent_cwd,
+        parent_creds,
+    ) = {
+        let sched = SCHED.lock();
+        let cur = &sched.tasks[sched.current_idx];
+        if !cur.is_user {
+            return Err(Errno::Einval);
+        }
+        (
+            cur.pid,
+            cur.name,
+            cur.priority,
+            cur.address_space,
+            cur.user_brk_base,
+            cur.user_brk_current,
+            cur.user_mmap_next,
+            cur.cwd.clone(),
+            cur.creds.clone(),
+        )
+    };
+
+    let child_aspace = parent_aspace.clone_cow().map_err(|_| Errno::Enomem)?;
+    let kstack_top =
+        vmm::alloc_guarded_kernel_stack(KERNEL_STACK_PAGES).map_err(|_| Errno::Enomem)?;
+    let frame_addr = (kstack_top - (size_of::<TrapFrame>() as u64)) & !0xF;
+    let frame_ptr = frame_addr as *mut TrapFrame;
+
+    let mut child_frame = *parent_frame;
+    child_frame.rax = 0; // fork() returns 0 in the child!
+    unsafe {
+        frame_ptr.write(child_frame);
+    }
+
+    let child_tid = alloc_tid();
+    let child_task = Task {
+        tid: child_tid,
+        pid: child_tid,
+        ppid: parent_pid,
+        name: parent_name,
+        state: TaskState::Ready,
+        priority: parent_prio,
+        quantum_ticks: DEFAULT_QUANTUM_TICKS,
+        remaining_ticks: DEFAULT_QUANTUM_TICKS,
+        cpu_ticks: 0,
+        context_switches: 0,
+        is_user: true,
+        address_space: child_aspace,
+        kernel_stack_top: kstack_top,
+        kernel_rsp: frame_addr,
+        user_brk_base: parent_brk_base,
+        user_brk_current: parent_brk_cur,
+        user_mmap_next: parent_mmap,
+        cwd: parent_cwd,
+        creds: parent_creds,
+        pending_signals: 0,
+    };
+
+    SCHED.lock().tasks.push(child_task);
+    Ok(child_tid)
+}
+
+/// Wait for a child process (`target_pid <= 0` for any child of `parent_pid`, or specific `target_pid > 0`).
+/// Returns `Ok((child_pid, exit_code))` or `Err(Errno::Echild)`.
+pub fn wait4_child(target_pid: i32, nonblocking: bool) -> Result<(u32, i32), Errno> {
+    let parent_pid = current_pid();
+    loop {
+        {
+            let mut sched = SCHED.lock();
+            let mut has_matching_child = false;
+            let mut zombie_idx_and_info: Option<(usize, u32, i32)> = None;
+
+            for (idx, t) in sched.tasks.iter().enumerate() {
+                let matches = if target_pid > 0 {
+                    t.pid == (target_pid as u32) && (t.ppid == parent_pid || parent_pid == 1)
+                } else {
+                    t.ppid == parent_pid && t.pid != parent_pid
+                };
+                if matches {
+                    has_matching_child = true;
+                    if let TaskState::Zombie { exit_code } = t.state {
+                        zombie_idx_and_info = Some((idx, t.pid, exit_code));
+                        break;
+                    }
+                }
+            }
+
+            if let Some((idx, reaped_pid, exit_code)) = zombie_idx_and_info {
+                let removed = sched.tasks.remove(idx);
+                if removed.is_user {
+                    removed.address_space.destroy_user();
+                }
+                if idx < sched.current_idx {
+                    sched.current_idx -= 1;
+                }
+                return Ok((reaped_pid, exit_code));
+            }
+
+            if !has_matching_child {
+                return Err(Errno::Echild);
+            }
+            if nonblocking {
+                return Ok((0, 0));
+            }
+        }
+        sleep_ms(1);
+    }
+}
+
+/// Send a signal to `target_pid` (`sys_kill`), enforcing UID / `CAP_KILL` authorization.
+pub fn kill_process(target_pid: u32, sig: u32) -> Result<(), Errno> {
+    if sig > 64 {
+        return Err(Errno::Einval);
+    }
+    let (caller_euid, caller_caps) = with_current_task(|t| (t.creds.euid, t.creds.caps_effective));
+
+    let mut sched = SCHED.lock();
+    let target_idx = sched
+        .tasks
+        .iter()
+        .position(|t| t.pid == target_pid)
+        .ok_or(Errno::Esrch)?;
+
+    if target_pid == 1 && sig == SIGKILL {
+        return Err(Errno::Eperm); // PID 1 (init) is protected from SIGKILL
+    }
+
+    let target_uid = sched.tasks[target_idx].creds.uid;
+    if caller_euid != 0 && caller_euid != target_uid && (caller_caps & CAP_KILL) == 0 {
+        return Err(Errno::Eperm);
+    }
+
+    if sig == 0 {
+        return Ok(()); // Existence & permission check only
+    }
+
+    sched.tasks[target_idx].pending_signals |= 1u64 << (sig - 1);
+    if sig == SIGKILL || sig == aether_abi::signal::SIGTERM {
+        sched.tasks[target_idx].state = TaskState::Zombie {
+            exit_code: 128 + (sig as i32),
+        };
+    } else if matches!(
+        sched.tasks[target_idx].state,
+        TaskState::Blocked | TaskState::Sleeping { .. }
+    ) {
+        sched.tasks[target_idx].state = TaskState::Ready;
+    }
+
+    Ok(())
+}
+
+/// Populate up to `out.len()` `ProcInfo` process table snapshots.
+pub fn list_processes(out: &mut [ProcInfo]) -> usize {
+    let sched = SCHED.lock();
+    let count = sched.tasks.len().min(out.len());
+    for (slot, t) in out.iter_mut().zip(sched.tasks.iter()).take(count) {
+        *slot = ProcInfo {
+            pid: t.pid,
+            ppid: t.ppid,
+            uid: t.creds.uid,
+            gid: t.creds.gid,
+            euid: t.creds.euid,
+            egid: t.creds.egid,
+            state: t.state.as_u32(),
+            priority: t.priority as u32,
+            user_uuid: *t.creds.user_uuid.as_bytes(),
+            cpu_ticks: t.cpu_ticks,
+            name: t.name,
+        };
+    }
+    count
+}
+
+/// Helper for `sys_setuid` enforcing POSIX + capability rules.
+pub fn sys_setuid_current(new_uid: u32, new_uuid: Uuid) -> Result<(), Errno> {
+    with_current_task_mut(|t| {
+        let is_root = t.creds.euid == 0 || (t.creds.caps_effective & CAP_SETUID) != 0;
+        if is_root {
+            t.creds.uid = new_uid;
+            t.creds.euid = new_uid;
+            t.creds.suid = new_uid;
+            t.creds.user_uuid = new_uuid;
+            if new_uid != 0 {
+                // Dropping root drops effective capabilities
+                t.creds.caps_effective = 0;
+                t.creds.caps_permitted = 0;
+            }
+            Ok(())
+        } else if new_uid == t.creds.uid || new_uid == t.creds.suid {
+            t.creds.euid = new_uid;
+            t.creds.user_uuid = new_uuid;
+            Ok(())
+        } else {
+            Err(Errno::Eperm)
+        }
+    })
+}
+
+/// Helper for `sys_setgid` enforcing POSIX + capability rules.
+pub fn sys_setgid_current(new_gid: u32, new_group_uuid: Uuid) -> Result<(), Errno> {
+    with_current_task_mut(|t| {
+        let is_root = t.creds.euid == 0 || (t.creds.caps_effective & CAP_SETGID) != 0;
+        if is_root {
+            t.creds.gid = new_gid;
+            t.creds.egid = new_gid;
+            t.creds.sgid = new_gid;
+            t.creds.group_uuid = new_group_uuid;
+            Ok(())
+        } else if new_gid == t.creds.gid || new_gid == t.creds.sgid {
+            t.creds.egid = new_gid;
+            t.creds.group_uuid = new_group_uuid;
+            Ok(())
+        } else {
+            Err(Errno::Eperm)
+        }
+    })
 }

@@ -5,7 +5,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::alloc::Layout;
-use core::arch::asm;
+use core::arch::{asm, global_asm};
+use core::ptr::addr_of;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::x86_64::paging::{
     PagingError, PTE_NO_EXECUTE, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
@@ -16,9 +18,9 @@ use crate::mm::heap;
 use crate::mm::pmm::{self, PmmError};
 use crate::mm::vmm::{self, AddressSpace};
 use crate::mm::PAGE_SIZE;
-use crate::sched::{self, PRIORITY_HIGH, PRIORITY_NORMAL};
+use crate::sched::{self, Credentials, PRIORITY_HIGH, PRIORITY_NORMAL};
 use crate::sync::{Mutex, Semaphore, WaitQueue};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use crate::syscall;
 
 pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     if !boot.cmdline.contains("selftest=") {
@@ -26,7 +28,7 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     }
 
     crate::panic::set_test_mode(true);
-    crate::kinfo!("=== AetherOS Kernel Self-Test Suite (Milestones 1, 2 & 3) ===");
+    crate::kinfo!("=== AetherOS Kernel Self-Test Suite (Milestones 1 - 4) ===");
 
     // Milestone 1 tests
     test_boot_handoff(boot);
@@ -45,7 +47,11 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     test_timer_and_sleep();
     test_preemptive_multitasking_and_sync();
 
-    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1, 2 & 3 KERNEL TESTS PASSED");
+    // Milestone 4 tests (Ring 3 User Mode, Syscalls, Pointer Validation, Fork/Wait4, Fault Isolation)
+    test_ring3_syscalls_fork_and_pointer_validation();
+    test_ring3_fault_isolation();
+
+    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 4 KERNEL TESTS PASSED");
     // Exit code 0x10 -> QEMU exit status ((0x10 << 1) | 1) = 33 (PASS)
     qemu_debug_exit(0x10);
 }
@@ -543,5 +549,219 @@ fn test_preemptive_multitasking_and_sync() {
         final_counter,
         a_work,
         b_work
+    );
+}
+
+extern "C" {
+    static ring3_test_prog_start: u8;
+    static ring3_test_prog_end: u8;
+    static ring3_bad_kread_start: u8;
+    static ring3_bad_kread_end: u8;
+    static ring3_bad_priv_start: u8;
+    static ring3_bad_priv_end: u8;
+}
+
+global_asm!(
+    r#"
+.section .rodata
+
+// Position-independent Ring 3 user program testing AetherOS native Syscall ABI v1:
+// 1. SYS_ABI_VERSION (0) == 0x10000
+// 2. SYS_GETPID (74) >= 3
+// 3. SYS_BRK (53) -> expand user heap to 0x00801000 (demand-paged in Ring 3)
+// 4. Write "[Ring3] Hello from user mode!\n" (30 bytes) and SYS_WRITE(1, 0x00800000, 30)
+// 5. Malicious SYS_WRITE(1, 0xffffffff80000000, 16) -> must return -14 (-EFAULT)
+// 6. Unsupported syscall 999 -> must return -38 (-ENOSYS)
+// 7. SYS_FORK (71) -> child mutates [0x00800000] (COW fault in Ring 3!) and exits(42);
+//    parent calls SYS_WAIT4(-1, 0x00800100, 0), verifies child status == (42 << 8) and
+//    verifies parent's own [0x00800000] is untouched, then exits(77).
+.global ring3_test_prog_start
+ring3_test_prog_start:
+    // 1. SYS_ABI_VERSION
+    xor eax, eax
+    syscall
+    cmp rax, 0x10000
+    jne 9f
+
+    // 2. SYS_GETPID
+    mov eax, 74
+    syscall
+    cmp rax, 3
+    jb 9f
+
+    // 3. SYS_BRK(0x00801000)
+    mov eax, 53
+    mov edi, 0x00801000
+    syscall
+    cmp rax, 0x00801000
+    jne 9f
+
+    // 4. Store "Ring3-OK\n" at 0x00800000 (demand page fault in Ring 3!)
+    mov ebx, 0x00800000
+    movabs rax, 0x4b4f2d33676e6952
+    mov [rbx], rax
+    mov byte ptr [rbx + 8], 0x0a
+
+    // SYS_WRITE(1, 0x00800000, 9)
+    mov eax, 2
+    mov edi, 1
+    mov esi, 0x00800000
+    mov edx, 9
+    syscall
+    cmp rax, 9
+    jne 9f
+
+    // 5. Malicious SYS_WRITE with higher-half kernel address -> must return -14 (-EFAULT)
+    mov eax, 2
+    mov edi, 1
+    mov rsi, -0x80000000
+    mov edx, 16
+    syscall
+    cmp rax, -14
+    jne 9f
+
+    // 6. Unimplemented syscall 999 -> must return -38 (-ENOSYS)
+    mov eax, 999
+    syscall
+    cmp rax, -38
+    jne 9f
+
+    // 7. SYS_FORK()
+    mov eax, 71
+    syscall
+    test rax, rax
+    js 9f
+    jnz 1f
+
+    // --- Child process (RAX == 0) ---
+    // Mutate [0x00800000] = 'C' (triggers Ring 3 Copy-on-Write #PF!)
+    mov byte ptr [rbx], 0x43
+    mov eax, 70
+    mov edi, 42
+    syscall
+    ud2
+
+1:
+    // --- Parent process (RAX == child_pid) ---
+    mov r12, rax
+    // SYS_WAIT4(-1, 0x00800100, 0)
+    mov eax, 73
+    mov rdi, -1
+    mov esi, 0x00800100
+    xor edx, edx
+    syscall
+    cmp rax, r12
+    jne 9f
+
+    // Verify child exit status == (42 << 8) == 0x2a00
+    mov eax, dword ptr [rbx + 0x100]
+    cmp eax, 0x2a00
+    jne 9f
+
+    // Verify parent's [0x00800000] is still 'R' (0x52), isolated from child's COW write
+    cmp byte ptr [rbx], 0x52
+    jne 9f
+
+    // Success: SYS_EXIT(77)
+    mov eax, 70
+    mov edi, 77
+    syscall
+    ud2
+
+9:
+    // Failure: SYS_EXIT(99)
+    mov eax, 70
+    mov edi, 99
+    syscall
+    ud2
+.global ring3_test_prog_end
+ring3_test_prog_end:
+
+// Malicious Ring 3 program #1: attempts direct load from higher-half kernel memory
+.global ring3_bad_kread_start
+ring3_bad_kread_start:
+    mov rax, -0x80000000
+    mov rax, [rax]
+    mov eax, 70
+    xor edi, edi
+    syscall
+.global ring3_bad_kread_end
+ring3_bad_kread_end:
+
+// Malicious Ring 3 program #2: attempts privileged `cli` instruction in Ring 3
+.global ring3_bad_priv_start
+ring3_bad_priv_start:
+    cli
+    mov eax, 70
+    xor edi, edi
+    syscall
+.global ring3_bad_priv_end
+ring3_bad_priv_end:
+"#
+);
+
+fn code_slice(start: *const u8, end: *const u8) -> &'static [u8] {
+    let len = (end as usize) - (start as usize);
+    unsafe { core::slice::from_raw_parts(start, len) }
+}
+
+fn test_ring3_syscalls_fork_and_pointer_validation() {
+    let code = code_slice(
+        addr_of!(ring3_test_prog_start),
+        addr_of!(ring3_test_prog_end),
+    );
+    let syscalls_before = syscall::total_syscalls();
+    let pid = sched::spawn_user_code_process("user_init_test", code, Credentials::root())
+        .expect("spawn_user_code_process");
+
+    let exit_code = sched::wait_tid(pid).expect("wait_tid(user_init_test)");
+    let syscalls_after = syscall::total_syscalls();
+
+    assert_eq!(
+        exit_code, 77,
+        "Ring 3 test process exited with {} (expected 77)",
+        exit_code
+    );
+    assert!(
+        syscalls_after >= syscalls_before + 9,
+        "expected >= 9 syscalls executed from Ring 3"
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] ring3_syscalls_fork_and_pointer_validation (pid={}, exit_code={}, syscalls={})",
+        pid,
+        exit_code,
+        syscalls_after - syscalls_before
+    );
+}
+
+fn test_ring3_fault_isolation() {
+    // 1. Direct kernel memory read from Ring 3 must fault (#PF) and terminate process with 139 (128+SIGSEGV)
+    let kread_code = code_slice(
+        addr_of!(ring3_bad_kread_start),
+        addr_of!(ring3_bad_kread_end),
+    );
+    let pid1 = sched::spawn_user_code_process("malicious_kread", kread_code, Credentials::root())
+        .expect("spawn malicious_kread");
+    let code1 = sched::wait_tid(pid1).expect("wait malicious_kread");
+    assert_eq!(
+        code1, 139,
+        "Ring 3 kernel-read attempt must be killed with SIGSEGV (139)"
+    );
+
+    // 2. Privileged instruction (`cli`) in Ring 3 must fault (#GP) and terminate process with 139
+    let priv_code = code_slice(addr_of!(ring3_bad_priv_start), addr_of!(ring3_bad_priv_end));
+    let pid2 = sched::spawn_user_code_process("malicious_cli", priv_code, Credentials::root())
+        .expect("spawn malicious_cli");
+    let code2 = sched::wait_tid(pid2).expect("wait malicious_cli");
+    assert_eq!(
+        code2, 139,
+        "Ring 3 privileged instruction must be killed with SIGSEGV (139)"
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] ring3_fault_isolation (kread_exit={}, priv_cli_exit={})",
+        code1,
+        code2
     );
 }

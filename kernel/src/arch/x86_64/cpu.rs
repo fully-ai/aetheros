@@ -12,6 +12,8 @@ pub const MSR_STAR: u32 = 0xC000_0081;
 pub const MSR_LSTAR: u32 = 0xC000_0082;
 pub const MSR_CSTAR: u32 = 0xC000_0083;
 pub const MSR_SFMASK: u32 = 0xC000_0084;
+/// Mask IF (bit 9), TF (bit 8), DF (bit 10), AC (bit 18) on SYSCALL entry.
+pub const MSR_FMASK_BITS: u64 = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 18);
 pub const MSR_FS_BASE: u32 = 0xC000_0100;
 pub const MSR_GS_BASE: u32 = 0xC000_0101;
 pub const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;

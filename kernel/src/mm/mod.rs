@@ -1,5 +1,6 @@
 pub mod heap;
 pub mod pmm;
+pub mod user_access;
 pub mod vmm;
 
 pub const PAGE_SIZE: usize = 4096;

@@ -15,6 +15,7 @@ pub mod panic;
 pub mod sched;
 pub mod selftest;
 pub mod sync;
+pub mod syscall;
 
 use aether_abi::{ABI_VERSION_MAJOR, ABI_VERSION_MINOR};
 use aether_uuid::Uuid;
@@ -107,16 +108,21 @@ pub extern "C" fn _start() -> ! {
 
     // Stage 5: Initialize GDT, TSS (with IST1 #DF / IST2 #NMI / IST3 #MC stacks)
     arch::x86_64::gdt::init();
-    kinfo!(
-        "GDT & TSS initialized (CS={:#04x}, TR={:#04x})",
-        arch::x86_64::gdt::read_cs(),
-        arch::x86_64::gdt::read_tr()
-    );
 
     // Stage 6: Remap legacy 8259 PIC (vectors 32..47, all masked) & load 256-entry IDT
     arch::x86_64::pic::init_and_mask_all();
     arch::x86_64::idt::init();
-    kinfo!("IDT (256 vectors) loaded and legacy 8259 PIC remapped (32..47, masked)");
+
+    // Stage 6b: Initialize Per-CPU GS base and SYSCALL/SYSRET MSRs
+    arch::x86_64::percpu::init();
+    arch::x86_64::syscall_entry::init();
+    kinfo!(
+        "GDT, TSS, IDT (256 vecs), Per-CPU GS & SYSCALL ABI v{}.{} initialized (CS={:#04x}, TR={:#04x})",
+        ABI_VERSION_MAJOR,
+        ABI_VERSION_MINOR,
+        arch::x86_64::gdt::read_cs(),
+        arch::x86_64::gdt::read_tr()
+    );
 
     // Stage 7: Initialize Physical Memory Manager (bitmap allocator over Limine memmap)
     let pmm_stats = match mm::pmm::init(&boot_info) {

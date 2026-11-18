@@ -199,6 +199,8 @@ isr_common_stub:
     call isr_dispatch_rust
     mov rsp, rax
 
+.global isr_restore_trapframe
+isr_restore_trapframe:
     pop r15
     pop r14
     pop r13

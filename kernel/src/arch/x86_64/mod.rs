@@ -5,8 +5,10 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod paging;
+pub mod percpu;
 pub mod pic;
 pub mod serial;
+pub mod syscall_entry;
 pub mod timer;
 
 use core::arch::asm;
