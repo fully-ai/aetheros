@@ -562,6 +562,97 @@ fn main(args: &[&str]) -> i32 {
                 }
             }
         }
+        "chgrp" => {
+            if effective_args.len() < 3 {
+                eprintln!("usage: chgrp <gid> <path>");
+                return 1;
+            }
+            let gid = effective_args[1].parse::<u32>().unwrap_or(0);
+            let path = effective_args[2];
+            let cur_uid = stat(path).map(|s| s.uid).unwrap_or(0);
+            if let Err(e) = chown(path, cur_uid, gid) {
+                eprintln!("chgrp: {}: errno {}", path, e);
+                return 1;
+            }
+            0
+        }
+        "getfacl" => {
+            if effective_args.len() < 2 {
+                eprintln!("usage: getfacl <path>");
+                return 1;
+            }
+            let path = effective_args[1];
+            let st = match stat(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("getfacl: {}: errno {}", path, e);
+                    return 1;
+                }
+            };
+            println!("# file: {}", path);
+            println!(
+                "# owner: {} ({})",
+                st.uid,
+                Uuid::from_bytes(st.owner_user_uuid)
+            );
+            println!(
+                "# group: {} ({})",
+                st.gid,
+                Uuid::from_bytes(st.owner_group_uuid)
+            );
+            let mut acl = [libaether::UserAclEntry {
+                subject_uuid: [0; 16],
+                is_group: 0,
+                allow_rwx: 0,
+                deny_rwx: 0,
+                _pad: 0,
+            }; 16];
+            if let Ok(n) = libaether::get_acl(path, &mut acl) {
+                for ace in acl.iter().take(n) {
+                    let kind = if ace.is_group == 0 { "user" } else { "group" };
+                    let r = if (ace.allow_rwx & 4) != 0 { 'r' } else { '-' };
+                    let w = if (ace.allow_rwx & 2) != 0 { 'w' } else { '-' };
+                    let x = if (ace.allow_rwx & 1) != 0 { 'x' } else { '-' };
+                    println!(
+                        "{}:{}:{}{}{}",
+                        kind,
+                        Uuid::from_bytes(ace.subject_uuid),
+                        r,
+                        w,
+                        x
+                    );
+                }
+            }
+            0
+        }
+        "setfacl" => {
+            // usage: setfacl <uuid> <rwx_octal_0_to_7> <path>
+            if effective_args.len() < 4 {
+                eprintln!("usage: setfacl <subject_uuid> <rwx_mask> <path>");
+                return 1;
+            }
+            let uuid = match Uuid::parse_str(effective_args[1]) {
+                Some(u) => u,
+                None => {
+                    eprintln!("setfacl: invalid UUID '{}'", effective_args[1]);
+                    return 1;
+                }
+            };
+            let allow = effective_args[2].parse::<u8>().unwrap_or(4) & 7;
+            let path = effective_args[3];
+            let entry = libaether::UserAclEntry {
+                subject_uuid: *uuid.as_bytes(),
+                is_group: 0,
+                allow_rwx: allow,
+                deny_rwx: 0,
+                _pad: 0,
+            };
+            if let Err(e) = libaether::set_acl(path, &[entry]) {
+                eprintln!("setfacl: {}: errno {}", path, e);
+                return 1;
+            }
+            0
+        }
         other => {
             eprintln!("coreutils: unknown utility '{}'", other);
             1

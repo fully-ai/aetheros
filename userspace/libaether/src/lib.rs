@@ -460,6 +460,46 @@ pub fn get_execute_as(path: &str) -> Result<Uuid, i64> {
     check_ret(r).map(|_| Uuid::from_bytes(bytes))
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UserAclEntry {
+    pub subject_uuid: [u8; 16],
+    pub is_group: u8,
+    pub allow_rwx: u8,
+    pub deny_rwx: u8,
+    pub _pad: u8,
+}
+
+pub fn get_acl(path: &str, out: &mut [UserAclEntry]) -> Result<usize, i64> {
+    let mut cpath = Vec::with_capacity(path.len() + 1);
+    cpath.extend_from_slice(path.as_bytes());
+    cpath.push(0);
+    let r = unsafe {
+        syscall3(
+            SYS_GET_ACL,
+            cpath.as_ptr() as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+        )
+    };
+    check_ret(r).map(|n| n as usize)
+}
+
+pub fn set_acl(path: &str, entries: &[UserAclEntry]) -> Result<(), i64> {
+    let mut cpath = Vec::with_capacity(path.len() + 1);
+    cpath.extend_from_slice(path.as_bytes());
+    cpath.push(0);
+    let r = unsafe {
+        syscall3(
+            SYS_SET_ACL,
+            cpath.as_ptr() as u64,
+            entries.as_ptr() as u64,
+            entries.len() as u64,
+        )
+    };
+    check_ret(r).map(|_| ())
+}
+
 pub fn elevate_sudo(reason: &str) -> Result<(), i64> {
     let mut creason = Vec::with_capacity(reason.len() + 1);
     creason.extend_from_slice(reason.as_bytes());
