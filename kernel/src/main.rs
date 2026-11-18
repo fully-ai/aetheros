@@ -10,6 +10,7 @@ pub mod arch;
 pub mod boot;
 pub mod drivers;
 pub mod fs;
+pub mod gui;
 pub mod ipc;
 pub mod log;
 pub mod mm;
@@ -218,7 +219,15 @@ pub extern "C" fn _start() -> ! {
     // Stage 13: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    // Stage 14: Launch user-space /sbin/init (PID 1) in Ring 3
+    // Stage 14: Initialize Framebuffer Desktop Compositor (Milestone 14) & launch /sbin/init (PID 1)
+    let (gui_w, gui_h, gui_crc) = gui::init_desktop();
+    kinfo!(
+        "Desktop Compositor active: {}x{} backbuffer, 3 windows composited (CRC={:#010x})",
+        gui_w,
+        gui_h,
+        gui_crc
+    );
+
     let init_argv = alloc::vec![alloc::string::String::from("/sbin/init")];
     let init_envp = alloc::vec![
         alloc::string::String::from("PATH=/bin:/sbin:/usr/bin"),

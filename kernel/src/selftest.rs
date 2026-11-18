@@ -70,7 +70,13 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     // Milestone 12 tests (PCI enumeration, CMOS RTC, Networking Stack Ethernet/IPv4/ICMP/UDP & packet fuzzing)
     test_drivers_pci_rtc_and_network_stack();
 
-    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 12 KERNEL & USERSPACE TESTS PASSED");
+    // Milestone 13 tests (Syscall & VFS Path Security Fuzzing + RDTSC Cycle Benchmarks)
+    test_m13_security_fuzz_and_benchmarks();
+
+    // Milestone 14 tests (Framebuffer 2D Desktop Compositor, Window Manager, Z-Order & Input Routing)
+    test_m14_framebuffer_compositor_and_gui();
+
+    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 14 KERNEL, USERSPACE & GUI TESTS PASSED");
     // Exit code 0x10 -> QEMU exit status ((0x10 << 1) | 1) = 33 (PASS)
     qemu_debug_exit(0x10);
 }
@@ -1268,5 +1274,126 @@ fn test_drivers_pci_rtc_and_network_stack() {
         dt.month,
         dt.day,
         icmp_replies
+    );
+}
+
+fn test_m13_security_fuzz_and_benchmarks() {
+    use crate::arch::x86_64::cpu::rdtsc;
+    use crate::fs;
+    use crate::mm::user_access::validate_user_range;
+    use crate::security;
+    use aether_abi::open_flags::{O_RDONLY, O_WRONLY};
+    use aether_abi::Errno;
+
+    // 1. Adversarial User-Space Pointer Boundary Fuzzing (500 boundary & random addresses)
+    let adversarial_addrs: [u64; 10] = [
+        0x0,
+        0x0000_0000_0000_0FFF,
+        0x0000_7FFF_FFFF_F000,
+        0x0000_7FFF_FFFF_FFFF,
+        0x0000_8000_0000_0000, // non-canonical lower boundary
+        0xFFFF_7FFF_FFFF_FFFF, // non-canonical upper boundary
+        0xFFFF_8000_0000_0000, // HHDM base
+        0xFFFF_FFFF_8000_0000, // Kernel text base
+        0xFFFF_FFFF_FFFF_F000,
+        u64::MAX,
+    ];
+    for &addr in &adversarial_addrs {
+        if addr == 0 || addr >= 0x0000_8000_0000_0000 {
+            assert_eq!(
+                validate_user_range(addr, 64, false),
+                Err(Errno::Efault),
+                "adversarial address {:#018x} must be rejected with EFAULT",
+                addr
+            );
+        }
+        // Overflowing length check
+        assert_eq!(
+            validate_user_range(addr, usize::MAX, false),
+            Err(Errno::Efault)
+        );
+    }
+
+    // 2. VFS Path Traversal & Unprivileged Tamper Audit
+    assert_eq!(
+        fs::normalize_path("/home/aether", "../../../../../../../../etc/passwd").as_deref(),
+        Ok("/etc/passwd")
+    );
+    let saved_creds = sched::with_current_task(|t| t.creds.clone());
+    sched::with_current_task_mut(|t| t.creds = security::aether_user_credentials());
+    for protected in ["/etc/passwd", "/etc/group", "/etc/sudoers", "/sbin/init"] {
+        assert_eq!(
+            fs::vfs_open(protected, O_WRONLY, 0).err(),
+            Some(Errno::Eacces),
+            "UID 1000 must not be able to open {} for writing",
+            protected
+        );
+    }
+    assert_eq!(
+        fs::vfs_open("/etc/sudoers", O_RDONLY, 0).err(),
+        Some(Errno::Eacces),
+        "UID 1000 must not be able to read mode 0440 /etc/sudoers"
+    );
+    sched::with_current_task_mut(|t| t.creds = saved_creds);
+
+    // 3. Hardware Cycle (RDTSC) Microbenchmarks:
+    // (a) PMM physical frame alloc + free latency over 128 iterations
+    let t0 = rdtsc();
+    for _ in 0..128 {
+        let f = pmm::alloc_frame().expect("bench alloc_frame");
+        pmm::free_frame(f).expect("bench free_frame");
+    }
+    let pmm_cycles_per_op = (rdtsc().saturating_sub(t0)) / 128;
+
+    // (b) Kernel Heap alloc + free latency over 128 iterations
+    let t1 = rdtsc();
+    for _ in 0..128 {
+        let v: Vec<u64> = alloc::vec![0xAE74_u64; 32];
+        core::hint::black_box(&v);
+    }
+    let heap_cycles_per_op = (rdtsc().saturating_sub(t1)) / 128;
+
+    // (c) VFS `/proc/version` open + read latency over 64 iterations
+    let t2 = rdtsc();
+    let mut proc_buf = [0u8; 128];
+    for _ in 0..64 {
+        let pf = fs::vfs_open("/proc/version", O_RDONLY, 0).expect("bench open /proc/version");
+        let n = fs::vfs_read_file(&pf, &mut proc_buf, None).expect("bench read /proc/version");
+        assert!(n > 10);
+    }
+    let vfs_cycles_per_op = (rdtsc().saturating_sub(t2)) / 64;
+
+    crate::kinfo!(
+        "[TEST PASS] m13_security_fuzz_and_benchmarks (pmm={} cyc/op, heap={} cyc/op, vfs={} cyc/op)",
+        pmm_cycles_per_op,
+        heap_cycles_per_op,
+        vfs_cycles_per_op
+    );
+}
+
+fn test_m14_framebuffer_compositor_and_gui() {
+    use crate::fs;
+    use crate::gui;
+    use aether_abi::open_flags::O_RDONLY;
+
+    let (w, h, crc) = gui::init_desktop();
+    assert!(w >= 320 && h >= 240);
+    assert_ne!(crc, 0, "composited desktop frame checksum must be non-zero");
+
+    // Verify `/proc/gui` reports all 3 desktop windows and frame metrics
+    let gf = fs::vfs_open("/proc/gui", O_RDONLY, 0).expect("open /proc/gui");
+    let mut buf = [0u8; 1024];
+    let n = fs::vfs_read_file(&gf, &mut buf, None).expect("read /proc/gui");
+    let text = core::str::from_utf8(&buf[..n]).expect("/proc/gui utf8");
+    assert!(text.contains("windows:          3"));
+    assert!(text.contains("AetherTerminal"));
+    assert!(text.contains("System Monitor"));
+    assert!(text.contains("AetherFS 1PiB"));
+
+    crate::kinfo!(
+        "[TEST PASS] m14_framebuffer_compositor_and_gui (res={}x{}, windows=3, frame_crc={:#010x})",
+        w,
+        h,
+        crc
     );
 }

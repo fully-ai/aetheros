@@ -210,6 +210,10 @@ pub fn read_audit_log() -> String {
     out
 }
 
+pub fn audit_count() -> usize {
+    IDENTITY_DB.lock().audit_log.len()
+}
+
 /// Add a new user to the identity database (requires root or `CAP_SETUID`).
 pub fn add_user(uid: u32, gid: u32, username: &str) -> Result<Uuid, Errno> {
     let is_priv = sched::with_current_task(|t| {

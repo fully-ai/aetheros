@@ -666,6 +666,7 @@ pub fn init(initramfs: Option<&[u8]>) {
     vfs.insert_proc("/proc/cpuinfo", 0o444);
     vfs.insert_proc("/proc/mounts", 0o444);
     vfs.insert_proc("/proc/syscalls", 0o444);
+    vfs.insert_proc("/proc/gui", 0o444);
 
     // Core /etc identity & configuration files
     vfs.insert_file("/etc/hostname", 0o644, 0, 0, Vec::from(&b"aether\n"[..]));
@@ -799,6 +800,7 @@ fn synthesize_proc_content(vfs: &VfsState, path: &str) -> Option<Vec<u8>> {
             sched_st.context_switches,
             sched_st.preemptions
         ),
+        "/proc/gui" => crate::gui::format_proc_gui(),
         _ => return None,
     };
     Some(s.into_bytes())

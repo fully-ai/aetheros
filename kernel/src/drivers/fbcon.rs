@@ -237,3 +237,30 @@ pub fn init(info: FramebufferInfo) {
 pub fn write_str(s: &str) {
     FBCON.lock().write_str(s);
 }
+
+pub fn dimensions() -> Option<(usize, usize)> {
+    FBCON.lock().fb.map(|f| (f.width, f.height))
+}
+
+pub fn blit_rgb_buffer(buf: &[u32], width: usize, height: usize) {
+    let con = FBCON.lock();
+    let Some(fb) = con.fb else { return };
+    let copy_w = width.min(fb.width);
+    let copy_h = height.min(fb.height);
+    let pitch_u32 = fb.pitch / 4;
+    let dst_ptr = fb.addr as *mut u32;
+    for y in 0..copy_h {
+        let src_row = y * width;
+        let dst_row = y * pitch_u32;
+        for x in 0..copy_w {
+            let rgb = buf[src_row + x];
+            let r = ((rgb >> 16) & 0xFF) as u8;
+            let g = ((rgb >> 8) & 0xFF) as u8;
+            let b = (rgb & 0xFF) as u8;
+            let packed = pack_rgb(&fb, r, g, b);
+            unsafe {
+                dst_ptr.add(dst_row + x).write_volatile(packed);
+            }
+        }
+    }
+}
