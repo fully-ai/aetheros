@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aether-abi",
+    "crates/aether-uuid",
+]
+exclude = [
+    "kernel",
+    "userspace",
+]
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/fully-ai/aetheros"
+authors = ["AetherOS Contributors <357420145+fully-ai@users.noreply.github.com>"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

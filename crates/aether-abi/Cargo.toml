@@ -1,0 +1,15 @@
+[package]
+name = "aether-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AetherOS native x86_64 syscall ABI v1 constants, error codes, and shared binary structs"
+
+[features]
+default = []
+std = []
+
+[lints]
+workspace = true

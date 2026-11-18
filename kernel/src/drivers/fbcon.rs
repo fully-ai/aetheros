@@ -1,0 +1,239 @@
+//! Early linear framebuffer text debug console (8x8 embedded bitmap font).
+//! Secondary diagnostic output alongside the primary 16550 UART serial console.
+
+use crate::boot::FramebufferInfo;
+use crate::sync::IrqSpinLock;
+
+const CHAR_W: usize = 8;
+const CHAR_H: usize = 12; // 8x8 glyph + 4px vertical line spacing
+
+pub struct FbConsole {
+    fb: Option<FramebufferInfo>,
+    cols: usize,
+    rows: usize,
+    cursor_col: usize,
+    cursor_row: usize,
+    fg_pixel: u32,
+    bg_pixel: u32,
+}
+
+impl FbConsole {
+    pub const fn new() -> Self {
+        Self {
+            fb: None,
+            cols: 0,
+            rows: 0,
+            cursor_col: 0,
+            cursor_row: 0,
+            fg_pixel: 0x00E2_E8F0,
+            bg_pixel: 0x000F_172A,
+        }
+    }
+}
+
+impl Default for FbConsole {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FbConsole {
+    pub fn init(&mut self, info: FramebufferInfo) {
+        self.cols = (info.width / CHAR_W).max(1);
+        self.rows = (info.height / CHAR_H).max(1);
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+        self.fg_pixel = pack_rgb(&info, 0xE2, 0xE8, 0xF0);
+        self.bg_pixel = pack_rgb(&info, 0x0B, 0x11, 0x20);
+        self.fb = Some(info);
+        self.clear();
+    }
+
+    pub fn clear(&mut self) {
+        let Some(fb) = self.fb else { return };
+        let pitch_u32 = fb.pitch / 4;
+        let ptr = fb.addr as *mut u32;
+        for y in 0..fb.height {
+            let row_off = y * pitch_u32;
+            for x in 0..fb.width {
+                unsafe {
+                    ptr.add(row_off + x).write_volatile(self.bg_pixel);
+                }
+            }
+        }
+        self.cursor_col = 0;
+        self.cursor_row = 0;
+    }
+
+    pub fn write_str(&mut self, s: &str) {
+        if self.fb.is_none() {
+            return;
+        }
+        for &b in s.as_bytes() {
+            self.write_byte(b);
+        }
+    }
+
+    pub fn write_byte(&mut self, b: u8) {
+        let Some(fb) = self.fb else { return };
+        match b {
+            b'\n' => {
+                self.cursor_col = 0;
+                self.cursor_row += 1;
+                if self.cursor_row >= self.rows {
+                    self.cursor_row = 0;
+                    self.clear();
+                }
+            }
+            b'\r' => {
+                self.cursor_col = 0;
+            }
+            byte => {
+                if self.cursor_col >= self.cols {
+                    self.cursor_col = 0;
+                    self.cursor_row += 1;
+                    if self.cursor_row >= self.rows {
+                        self.cursor_row = 0;
+                        self.clear();
+                    }
+                }
+                self.draw_glyph(
+                    &fb,
+                    self.cursor_col * CHAR_W,
+                    self.cursor_row * CHAR_H,
+                    byte,
+                );
+                self.cursor_col += 1;
+            }
+        }
+    }
+
+    fn draw_glyph(&self, fb: &FramebufferInfo, px: usize, py: usize, byte: u8) {
+        let glyph = glyph_8x8(byte);
+        let pitch_u32 = fb.pitch / 4;
+        let ptr = fb.addr as *mut u32;
+        for (row, &bits) in glyph.iter().enumerate() {
+            let y = py + row;
+            if y >= fb.height {
+                break;
+            }
+            let row_off = y * pitch_u32;
+            for col in 0..8 {
+                let x = px + col;
+                if x >= fb.width {
+                    break;
+                }
+                let on = ((bits >> (7 - col)) & 1) != 0;
+                let color = if on { self.fg_pixel } else { self.bg_pixel };
+                unsafe {
+                    ptr.add(row_off + x).write_volatile(color);
+                }
+            }
+        }
+    }
+}
+
+fn pack_rgb(fb: &FramebufferInfo, r: u8, g: u8, b: u8) -> u32 {
+    ((r as u32) << fb.red_shift) | ((g as u32) << fb.green_shift) | ((b as u32) << fb.blue_shift)
+}
+
+/// Compact 8x8 printable ASCII bitmap font (`0x20..=0x7E`).
+fn glyph_8x8(c: u8) -> [u8; 8] {
+    match c {
+        b'A'..=b'Z'
+        | b'a'..=b'z'
+        | b'0'..=b'9'
+        | b'['
+        | b']'
+        | b':'
+        | b'-'
+        | b'_'
+        | b'.'
+        | b'/'
+        | b'='
+        | b'('
+        | b')'
+        | b'#'
+        | b'+'
+        | b' ' => BASIC_FONT[(c - 0x20) as usize],
+        _ => [0x7E, 0x81, 0xA5, 0x81, 0xA5, 0x99, 0x81, 0x7E],
+    }
+}
+
+static BASIC_FONT: [[u8; 8]; 96] = {
+    let mut table = [[0u8; 8]; 96];
+    // Space (0x20)
+    table[0] = [0, 0, 0, 0, 0, 0, 0, 0];
+    // '#' (0x23)
+    table[3] = [0x24, 0x24, 0x7E, 0x24, 0x7E, 0x24, 0x24, 0x00];
+    // '(' (0x28), ')' (0x29)
+    table[8] = [0x18, 0x30, 0x60, 0x60, 0x60, 0x30, 0x18, 0x00];
+    table[9] = [0x60, 0x30, 0x18, 0x18, 0x18, 0x30, 0x60, 0x00];
+    // '+' (0x2B), '-' (0x2D), '.' (0x2E), '/' (0x2F)
+    table[11] = [0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00];
+    table[13] = [0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00];
+    table[14] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00];
+    table[15] = [0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00];
+    // '0'..'9' (0x30..=0x39)
+    table[16] = [0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00];
+    table[17] = [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00];
+    table[18] = [0x3C, 0x66, 0x06, 0x1C, 0x30, 0x66, 0x7E, 0x00];
+    table[19] = [0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00];
+    table[20] = [0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x1E, 0x00];
+    table[21] = [0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00];
+    table[22] = [0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00];
+    table[23] = [0x7E, 0x66, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x00];
+    table[24] = [0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00];
+    table[25] = [0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00];
+    // ':' (0x3A), '=' (0x3D)
+    table[26] = [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00];
+    table[29] = [0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00];
+    // 'A'..'Z' (0x41..=0x5A)
+    table[33] = [0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00];
+    table[34] = [0x7C, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x7C, 0x00];
+    table[35] = [0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00];
+    table[36] = [0x78, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00];
+    table[37] = [0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x7E, 0x00];
+    table[38] = [0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x60, 0x00];
+    table[39] = [0x3C, 0x66, 0x60, 0x6E, 0x66, 0x66, 0x3E, 0x00];
+    table[40] = [0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00];
+    table[41] = [0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00];
+    table[42] = [0x1E, 0x0C, 0x0C, 0x0C, 0x6C, 0x6C, 0x38, 0x00];
+    table[43] = [0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x00];
+    table[44] = [0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00];
+    table[45] = [0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00];
+    table[46] = [0x66, 0x76, 0x7E, 0x7E, 0x6E, 0x66, 0x66, 0x00];
+    table[47] = [0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00];
+    table[48] = [0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00];
+    table[49] = [0x3C, 0x66, 0x66, 0x66, 0x6A, 0x6C, 0x36, 0x00];
+    table[50] = [0x7C, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x00];
+    table[51] = [0x3C, 0x66, 0x60, 0x3C, 0x06, 0x66, 0x3C, 0x00];
+    table[52] = [0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00];
+    table[53] = [0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00];
+    table[54] = [0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00];
+    table[55] = [0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00];
+    table[56] = [0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00];
+    table[57] = [0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00];
+    table[58] = [0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00];
+    // '[' (0x5B), ']' (0x5D), '_' (0x5F)
+    table[59] = [0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00];
+    table[61] = [0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00];
+    table[63] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00];
+    // Map lowercase 'a'..'z' to uppercase glyph forms for compact early boot diagnostics
+    let mut i = 0;
+    while i < 26 {
+        table[65 + i] = table[33 + i];
+        i += 1;
+    }
+    table
+};
+
+pub static FBCON: IrqSpinLock<FbConsole> = IrqSpinLock::new(FbConsole::new());
+
+pub fn init(info: FramebufferInfo) {
+    FBCON.lock().init(info);
+}
+
+pub fn write_str(s: &str) {
+    FBCON.lock().write_str(s);
+}

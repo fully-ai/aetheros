@@ -1,0 +1,15 @@
+[package]
+name = "aether-uuid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AetherOS UUID-based identity and object identifier primitives"
+
+[features]
+default = []
+std = []
+
+[lints]
+workspace = true

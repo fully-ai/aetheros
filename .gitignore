@@ -1,0 +1,19 @@
+# Build outputs
+/target/
+/build/
+/kernel/target/
+/userspace/target/
+*.img
+*.iso
+*.qcow2
+*.raw
+*.elf
+*.bin
+*.log
+
+# Local backups / editor files
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
