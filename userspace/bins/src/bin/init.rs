@@ -178,15 +178,15 @@ fn main(args: &[&str]) -> i32 {
         }
     }
     log_init("Handing console over to /bin/aethersh");
-    let _ = run_service(&ServiceDef {
-        name: String::from("console-shell"),
-        command: String::from("/bin/aethersh"),
-        args: Vec::new(),
-        restart_policy: String::from("always"),
-        enabled: true,
-    });
-
-    0
+    loop {
+        let _ = run_service(&ServiceDef {
+            name: String::from("console-shell"),
+            command: String::from("/bin/aethersh"),
+            args: Vec::new(),
+            restart_policy: String::from("always"),
+            enabled: true,
+        });
+    }
 }
 
 aether_main!(main);

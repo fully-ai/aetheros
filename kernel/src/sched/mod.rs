@@ -916,6 +916,9 @@ pub fn wait4_child(target_pid: i32, nonblocking: bool) -> Result<(u32, i32), Err
             let mut zombie_idx_and_info: Option<(usize, u32, i32)> = None;
 
             for (idx, t) in sched.tasks.iter().enumerate() {
+                if !t.is_user {
+                    continue;
+                }
                 let matches = if target_pid > 0 {
                     t.pid == (target_pid as u32) && (t.ppid == parent_pid || parent_pid == 1)
                 } else {
