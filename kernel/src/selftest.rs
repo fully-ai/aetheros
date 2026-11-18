@@ -10,12 +10,15 @@ use core::arch::asm;
 use crate::arch::x86_64::paging::{
     PagingError, PTE_NO_EXECUTE, PTE_PRESENT, PTE_USER, PTE_WRITABLE,
 };
-use crate::arch::x86_64::{cpu::CpuFeatures, gdt, idt, qemu_debug_exit};
+use crate::arch::x86_64::{cpu::CpuFeatures, gdt, idt, qemu_debug_exit, timer};
 use crate::boot::BootInfo;
 use crate::mm::heap;
 use crate::mm::pmm::{self, PmmError};
 use crate::mm::vmm::{self, AddressSpace};
 use crate::mm::PAGE_SIZE;
+use crate::sched::{self, PRIORITY_HIGH, PRIORITY_NORMAL};
+use crate::sync::{Mutex, Semaphore, WaitQueue};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     if !boot.cmdline.contains("selftest=") {
@@ -23,7 +26,7 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     }
 
     crate::panic::set_test_mode(true);
-    crate::kinfo!("=== AetherOS Kernel Self-Test Suite (Milestones 1 & 2) ===");
+    crate::kinfo!("=== AetherOS Kernel Self-Test Suite (Milestones 1, 2 & 3) ===");
 
     // Milestone 1 tests
     test_boot_handoff(boot);
@@ -38,7 +41,11 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     test_vmm_address_space_isolation_and_cow();
     test_kernel_heap_and_alloc();
 
-    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 & 2 KERNEL TESTS PASSED");
+    // Milestone 3 tests
+    test_timer_and_sleep();
+    test_preemptive_multitasking_and_sync();
+
+    crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1, 2 & 3 KERNEL TESTS PASSED");
     // Exit code 0x10 -> QEMU exit status ((0x10 << 1) | 1) = 33 (PASS)
     qemu_debug_exit(0x10);
 }
@@ -346,8 +353,6 @@ fn test_vmm_address_space_isolation_and_cow() {
 
 fn test_kernel_heap_and_alloc() {
     let initial = heap::stats();
-    assert_eq!(initial.active_allocations, 0);
-    assert_eq!(initial.used_bytes, 0);
 
     {
         // 1. Box, Vec, String, BTreeMap exercise
@@ -396,10 +401,13 @@ fn test_kernel_heap_and_alloc() {
 
     let after = heap::stats();
     assert_eq!(
-        after.active_allocations, 0,
+        after.active_allocations, initial.active_allocations,
         "all test heap allocations must be freed"
     );
-    assert_eq!(after.used_bytes, 0, "used_bytes must return to 0");
+    assert_eq!(
+        after.used_bytes, initial.used_bytes,
+        "used_bytes must return to pre-test baseline"
+    );
     assert_eq!(
         after.free_blocks, 1,
         "free blocks must coalesce back into 1 contiguous free block"
@@ -412,5 +420,128 @@ fn test_kernel_heap_and_alloc() {
         after.peak_used_bytes / 1024,
         after.alloc_count,
         after.free_blocks
+    );
+}
+
+static SHARED_MUTEX_COUNTER: Mutex<u64> = Mutex::new(0);
+static CPU_WORKER_A_TICKS: AtomicU64 = AtomicU64::new(0);
+static CPU_WORKER_B_TICKS: AtomicU64 = AtomicU64::new(0);
+static EVENT_READY: AtomicBool = AtomicBool::new(false);
+static EVENT_WAITQ: WaitQueue = WaitQueue::new();
+static DONE_SEM: Semaphore = Semaphore::new(0);
+
+fn cpu_bound_worker(id: usize) {
+    // Pure CPU-bound loop WITHOUT voluntary yield_now(): relies on real 1000 Hz timer preemption!
+    let start_tick = timer::ticks();
+    while timer::ticks().saturating_sub(start_tick) < 12 {
+        if id == 1 {
+            CPU_WORKER_A_TICKS.fetch_add(1, Ordering::Relaxed);
+        } else {
+            CPU_WORKER_B_TICKS.fetch_add(1, Ordering::Relaxed);
+        }
+        core::hint::spin_loop();
+    }
+
+    for _ in 0..100 {
+        let mut guard = SHARED_MUTEX_COUNTER.lock();
+        *guard += 1;
+    }
+    DONE_SEM.release();
+}
+
+fn event_producer_worker(_arg: usize) {
+    sched::sleep_ms(6);
+    {
+        let mut guard = SHARED_MUTEX_COUNTER.lock();
+        *guard += 50;
+    }
+    EVENT_READY.store(true, Ordering::Release);
+    EVENT_WAITQ.wake_all();
+    DONE_SEM.release();
+}
+
+fn test_timer_and_sleep() {
+    let t0 = timer::ticks();
+    let sw0 = sched::stats().context_switches;
+    sched::sleep_ms(12);
+    let t1 = timer::ticks();
+    let sw1 = sched::stats().context_switches;
+
+    assert!(
+        t1 >= t0 + 12,
+        "sleep_ms(12) woke too early (t0={}, t1={})",
+        t0,
+        t1
+    );
+    assert!(
+        sw1 >= sw0 + 2,
+        "sleep_ms must context-switch to idle thread and back"
+    );
+    crate::kinfo!(
+        "[TEST PASS] timer_and_sleep (elapsed={} ms, switches={})",
+        t1 - t0,
+        sw1 - sw0
+    );
+}
+
+fn test_preemptive_multitasking_and_sync() {
+    *SHARED_MUTEX_COUNTER.lock() = 0;
+    CPU_WORKER_A_TICKS.store(0, Ordering::Relaxed);
+    CPU_WORKER_B_TICKS.store(0, Ordering::Relaxed);
+    EVENT_READY.store(false, Ordering::Relaxed);
+
+    let tid_a = sched::spawn_kernel_thread("cpu_worker_a", PRIORITY_NORMAL, cpu_bound_worker, 1)
+        .expect("spawn cpu_worker_a");
+    let tid_b = sched::spawn_kernel_thread("cpu_worker_b", PRIORITY_NORMAL, cpu_bound_worker, 2)
+        .expect("spawn cpu_worker_b");
+    let tid_p = sched::spawn_kernel_thread("evt_producer", PRIORITY_HIGH, event_producer_worker, 0)
+        .expect("spawn evt_producer");
+
+    // Verify dynamic priority adjustment
+    assert_eq!(sched::get_priority(tid_p), Some(PRIORITY_HIGH));
+    assert!(sched::set_priority(tid_b, PRIORITY_NORMAL + 1));
+    assert_eq!(sched::get_priority(tid_b), Some(PRIORITY_NORMAL + 1));
+    assert!(sched::set_priority(tid_b, PRIORITY_NORMAL));
+
+    // Wait on WaitQueue until producer signals EVENT_READY
+    while !EVENT_READY.load(Ordering::Acquire) {
+        EVENT_WAITQ.wait();
+    }
+
+    // Acquire semaphore 3 times (once per worker completion)
+    DONE_SEM.acquire();
+    DONE_SEM.acquire();
+    DONE_SEM.acquire();
+
+    // Reap all 3 exited kernel threads via wait_tid
+    assert_eq!(sched::wait_tid(tid_a), Ok(0));
+    assert_eq!(sched::wait_tid(tid_b), Ok(0));
+    assert_eq!(sched::wait_tid(tid_p), Ok(0));
+
+    let a_work = CPU_WORKER_A_TICKS.load(Ordering::Relaxed);
+    let b_work = CPU_WORKER_B_TICKS.load(Ordering::Relaxed);
+    let final_counter = *SHARED_MUTEX_COUNTER.lock();
+    let st = sched::stats();
+
+    assert!(
+        a_work > 0 && b_work > 0,
+        "both CPU-bound workers must make progress via timer preemption"
+    );
+    assert_eq!(
+        final_counter, 250,
+        "mutex-protected counter must equal 100 + 100 + 50"
+    );
+    assert!(
+        st.preemptions > 0,
+        "timer interrupt must trigger real preemptions"
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] preemptive_multitasking_and_sync (preemptions={}, switches={}, mutex_val={}, work_a={}, work_b={})",
+        st.preemptions,
+        st.context_switches,
+        final_counter,
+        a_work,
+        b_work
     );
 }

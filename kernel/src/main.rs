@@ -12,6 +12,7 @@ pub mod drivers;
 pub mod log;
 pub mod mm;
 pub mod panic;
+pub mod sched;
 pub mod selftest;
 pub mod sync;
 
@@ -162,9 +163,22 @@ pub extern "C" fn _start() -> ! {
         heap_stats.free_bytes / 1024
     );
 
-    // Stage 10: Run automated kernel self-tests when requested via kernel command line
+    // Stage 10: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
+    if let Err(err) = sched::init() {
+        panic!("Preemptive Scheduler init failed: {}", err);
+    }
+    arch::x86_64::timer::init();
+    arch::x86_64::sti();
+    kinfo!(
+        "Scheduler & Timer active: 1000 Hz PIT (IRQ0 -> vec {}), LAPIC={:#010x}, tasks={}",
+        arch::x86_64::timer::TIMER_VECTOR,
+        arch::x86_64::timer::lapic_phys_base(),
+        sched::stats().total_tasks
+    );
+
+    // Stage 11: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    kinfo!("Milestone 2 kernel initialization complete. Entering idle halt loop.");
+    kinfo!("Milestone 3 kernel initialization complete. Entering idle halt loop.");
     arch::x86_64::halt_loop()
 }

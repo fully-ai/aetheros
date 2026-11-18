@@ -7,6 +7,7 @@ pub mod idt;
 pub mod paging;
 pub mod pic;
 pub mod serial;
+pub mod timer;
 
 use core::arch::asm;
 
