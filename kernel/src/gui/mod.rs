@@ -66,6 +66,10 @@ pub struct Compositor {
     pub events_routed: u64,
     pub last_frame_crc: u32,
     next_win_id: u32,
+    prev_buttons: u8,
+    dragging: Option<(u32, isize, isize)>,
+    dirty: bool,
+    last_uptime_sec: u64,
 }
 
 impl Compositor {
@@ -82,6 +86,10 @@ impl Compositor {
             events_routed: 0,
             last_frame_crc: 0,
             next_win_id: 1,
+            prev_buttons: 0,
+            dragging: None,
+            dirty: false,
+            last_uptime_sec: 0,
         }
     }
 
@@ -512,6 +520,107 @@ pub fn append_terminal_output(text: &str) {
         }
     }
     if should_composite {
+        comp.dirty = true;
+    }
+}
+
+/// Process a live 3-byte PS/2 mouse packet: move cursor, focus clicked window, and drag by title bar.
+pub fn handle_ps2_mouse(buttons: u8, dx: i16, dy: i16) {
+    let mut comp = COMPOSITOR.lock();
+    if comp.width == 0 || comp.height == 0 {
+        return;
+    }
+
+    let nx = (comp.cursor_x as isize + dx as isize).clamp(0, comp.width.saturating_sub(2) as isize)
+        as usize;
+    let ny = (comp.cursor_y as isize - dy as isize).clamp(0, comp.height.saturating_sub(2) as isize)
+        as usize;
+    if nx != comp.cursor_x || ny != comp.cursor_y {
+        comp.cursor_x = nx;
+        comp.cursor_y = ny;
+        comp.events_routed += 1;
+        comp.dirty = true;
+    }
+
+    let left_now = (buttons & 0x01) != 0;
+    let left_prev = (comp.prev_buttons & 0x01) != 0;
+
+    if left_now && !left_prev {
+        // Left button just pressed: find topmost visible window under cursor
+        let mut hit: Option<(u32, Rect)> = None;
+        for &id in comp.z_order.iter().rev() {
+            if let Some(w) = comp.windows.iter().find(|w| w.id == id && w.visible) {
+                if w.rect.contains(nx, ny) {
+                    hit = Some((id, w.rect));
+                    break;
+                }
+            }
+        }
+        if let Some((id, r)) = hit {
+            comp.focus_window(id);
+            comp.events_routed += 1;
+            // Title bar hit (top 24 pixels) -> start window drag
+            if ny <= r.y + 24 {
+                comp.dragging = Some((id, nx as isize - r.x as isize, ny as isize - r.y as isize));
+            }
+            comp.dirty = true;
+        }
+    } else if left_now && left_prev {
+        if let Some((drag_id, off_x, off_y)) = comp.dragging {
+            let new_x = (nx as isize - off_x).max(0) as usize;
+            let new_y = (ny as isize - off_y).max(28) as usize;
+            comp.move_window(drag_id, new_x, new_y);
+            comp.dirty = true;
+        }
+    } else if !left_now && left_prev {
+        comp.dragging = None;
+    }
+
+    comp.prev_buttons = buttons;
+}
+
+/// Refresh System Monitor metrics every second and flush any dirty GUI frame to the framebuffer.
+pub fn tick_and_flush() {
+    let mut comp = COMPOSITOR.lock();
+    if comp.width == 0 || comp.height == 0 {
+        return;
+    }
+
+    let sec = crate::arch::x86_64::timer::uptime_ms() / 1000;
+    if sec != comp.last_uptime_sec {
+        comp.last_uptime_sec = sec;
+        let pmm_stats = crate::mm::pmm::stats();
+        let heap_stats = crate::mm::heap::stats();
+        let pmm_pct =
+            ((pmm_stats.allocated_frames * 100) / pmm_stats.usable_frames.max(1)).min(100) as u32;
+        let heap_pct =
+            ((heap_stats.used_bytes * 100) / heap_stats.mapped_bytes.max(1)).min(100) as u32;
+
+        if comp.windows.len() >= 2 {
+            let frames = comp.frames_composited;
+            let events = comp.events_routed;
+            comp.windows[1].lines.clear();
+            comp.windows[1]
+                .lines
+                .push(alloc::format!("CPUs: 2 (x86_64) | Uptime: {} s", sec));
+            comp.windows[1].lines.push(alloc::format!(
+                "GUI Frames: {} | Events: {}",
+                frames,
+                events
+            ));
+            comp.set_window_progress(2, "Physical RAM (PMM)", pmm_pct.max(8), 0x0022_C55E);
+            comp.set_window_progress(
+                2,
+                "Kernel Heap (Slab/Coalesce)",
+                heap_pct.max(15),
+                0x0038_BDF8,
+            );
+            comp.dirty = true;
+        }
+    }
+
+    if comp.dirty {
+        comp.dirty = false;
         comp.composite_frame();
     }
 }

@@ -219,7 +219,8 @@ pub extern "C" fn _start() -> ! {
     // Stage 13: Run automated kernel self-tests when requested via kernel command line
     selftest::maybe_run(&boot_info, &cpu_features);
 
-    // Stage 14: Initialize Framebuffer Desktop Compositor (Milestone 14) & launch /sbin/init (PID 1)
+    // Stage 14: Initialize Framebuffer Desktop Compositor (Milestone 14), PS/2 Input & /sbin/init
+    drivers::rtc::init_ps2_devices();
     let (gui_w, gui_h, gui_crc) = gui::init_desktop();
     kinfo!(
         "Desktop Compositor active: {}x{} backbuffer, 3 windows composited (CRC={:#010x})",
@@ -247,6 +248,8 @@ pub extern "C" fn _start() -> ! {
 
     kinfo!("Kernel initialization complete. Handing execution to preemptive scheduler.");
     loop {
-        sched::sleep_ms(1000);
+        drivers::rtc::poll_ps2_events();
+        gui::tick_and_flush();
+        sched::sleep_ms(16);
     }
 }

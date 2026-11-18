@@ -266,17 +266,28 @@ pub fn blit_rgb_buffer(buf: &[u32], width: usize, height: usize) {
     let copy_h = height.min(fb.height);
     let pitch_u32 = fb.pitch / 4;
     let dst_ptr = fb.addr as *mut u32;
+    let fast_bgrx = fb.red_shift == 16 && fb.green_shift == 8 && fb.blue_shift == 0;
     for y in 0..copy_h {
         let src_row = y * width;
         let dst_row = y * pitch_u32;
-        for x in 0..copy_w {
-            let rgb = buf[src_row + x];
-            let r = ((rgb >> 16) & 0xFF) as u8;
-            let g = ((rgb >> 8) & 0xFF) as u8;
-            let b = (rgb & 0xFF) as u8;
-            let packed = pack_rgb(&fb, r, g, b);
+        if fast_bgrx {
             unsafe {
-                dst_ptr.add(dst_row + x).write_volatile(packed);
+                core::ptr::copy_nonoverlapping(
+                    buf.as_ptr().add(src_row),
+                    dst_ptr.add(dst_row),
+                    copy_w,
+                );
+            }
+        } else {
+            for x in 0..copy_w {
+                let rgb = buf[src_row + x];
+                let r = ((rgb >> 16) & 0xFF) as u8;
+                let g = ((rgb >> 8) & 0xFF) as u8;
+                let b = (rgb & 0xFF) as u8;
+                let packed = pack_rgb(&fb, r, g, b);
+                unsafe {
+                    dst_ptr.add(dst_row + x).write_volatile(packed);
+                }
             }
         }
     }
