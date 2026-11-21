@@ -419,6 +419,12 @@ pub fn setgid(gid: u32) -> Result<(), i64> {
     check_ret(r).map(|_| ())
 }
 
+pub fn sync() {
+    unsafe {
+        let _ = syscall0(SYS_SYNC);
+    }
+}
+
 pub fn get_user_uuid() -> Uuid {
     let mut bytes = [0u8; 16];
     let _ = unsafe { syscall1(SYS_GET_USER_UUID, bytes.as_mut_ptr() as u64) };

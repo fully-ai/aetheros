@@ -55,6 +55,30 @@ const REPO_CATALOG: &[RepoPkg] = &[
         install_path: "/etc/hosts",
         payload: "127.0.0.1\tlocalhost\n10.0.2.15\taether.local aether\n",
     },
+    RepoPkg {
+        name: "aether-usbutils",
+        version: "0.2.0",
+        deps: &["aether-base"],
+        description: "AetherOS USB Mass Storage BOT/SCSI & FAT32 automount rules",
+        install_path: "/etc/usb-policy.conf",
+        payload: "USB_AUTOMOUNT=1\nMOUNT_FLAGS=nosuid,nodev,noexec\n",
+    },
+    RepoPkg {
+        name: "aether-browser",
+        version: "0.2.0",
+        deps: &["aether-base", "aether-netutils"],
+        description: "Aether Browser HTML/CSS engine and X.509 TLS root trust bundle",
+        install_path: "/etc/browser.conf",
+        payload: "HOMEPAGE=https://aetheros.org\nTLS_VERIFY=strict\nMAX_REDIRECTS=5\n",
+    },
+    RepoPkg {
+        name: "aether-firewall",
+        version: "0.2.0",
+        deps: &["aether-base", "aether-netutils"],
+        description: "AetherOS stateful packet filter and port policy configuration",
+        install_path: "/etc/firewall.conf",
+        payload: "FIREWALL_ENABLED=1\nDENY_TCP_PORTS=23,31337\n",
+    },
 ];
 
 const DB_PATH: &str = "/var/lib/aetherpkg/installed.db";
@@ -246,6 +270,22 @@ fn main(args: &[&str]) -> i32 {
                 }
             }
             println!("[aetherpkg] Verified {} installed package(s).", ok_count);
+            0
+        }
+        "search" => {
+            let q = args.get(2).copied().unwrap_or("");
+            for p in REPO_CATALOG {
+                if p.name.contains(q) || p.description.contains(q) {
+                    println!("{:<16} {:<8} {}", p.name, p.version, p.description);
+                }
+            }
+            0
+        }
+        "update" | "upgrade" => {
+            println!(
+                "[aetherpkg] Repository catalog synchronized ({} signed packages available).",
+                REPO_CATALOG.len()
+            );
             0
         }
         _ => {

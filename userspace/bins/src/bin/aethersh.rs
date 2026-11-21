@@ -209,12 +209,21 @@ fn try_run_builtin(cmd: &ParsedCommand, state: &mut ShellState) -> Option<i32> {
         return Some(0);
     }
     match cmd.argv[0].as_str() {
-        "help" => {
-            println!("AetherSH (AetherOS Native Shell) — Commands:");
-            println!("  Built-ins: help clear echo pwd cd env export history exit");
-            println!("  Programs : ls cat mkdir rmdir touch rm cp mv stat chmod chown");
-            println!("             whoami id groups ps kill uname uptime mount umount");
-            println!("             df free dmesg grep wc sudo useradd aetherpkg");
+        "help" | "man" => {
+            println!("AetherSH v0.2.0 (AetherOS Native Shell) — Command Ecosystem:");
+            println!("  Built-ins : help man clear echo pwd cd env export umask history exit");
+            println!("  Filesystem: ls cat head tail less more mkdir rmdir touch rm cp mv stat");
+            println!("              chmod chown chgrp getfacl setfacl df du mount umount findmnt");
+            println!("              basename dirname readlink realpath sync fsck mkfs");
+            println!("  USB & HW  : lsusb lspci lsblk blkid eject lscpu lsmem vmstat dmesg");
+            println!("  Networking: ip ifconfig ping route arp dig nslookup host dhclient");
+            println!("              curl wget netstat ss hostname");
+            println!("  System/Pkg: ps kill uname uptime free systemctl journalctl sudo useradd");
+            println!("              whoami id groups aetherpkg grep wc sort uniq sha256sum md5sum");
+            Some(0)
+        }
+        "umask" => {
+            println!("0022");
             Some(0)
         }
         "clear" => {
@@ -331,6 +340,31 @@ fn execute_line(raw_line: &str, state: &mut ShellState) -> i32 {
         return 0;
     }
     state.history.push(String::from(line));
+
+    // Support command chaining via `;` and `&&`
+    if line.contains(';') {
+        let mut last = 0;
+        for part in line.split(';') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                last = execute_line(trimmed, state);
+            }
+        }
+        return last;
+    }
+    if line.contains("&&") {
+        let mut last = 0;
+        for part in line.split("&&") {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                last = execute_line(trimmed, state);
+                if last != 0 {
+                    return last;
+                }
+            }
+        }
+        return last;
+    }
 
     let background = if let Some(stripped) = line.strip_suffix('&') {
         line = stripped.trim();

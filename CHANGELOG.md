@@ -1,14 +1,21 @@
-# Changelog
+# Changelog (`CHANGELOG.md`)
 
-## [v0.1.0-alpha.1] - 2026-11-18
+## [v0.2.0-beta.1] - 2026-11-21
 
 ### Added
-- **Milestone 0 & 1 (Boot & x86_64 Kernel Foundation)**: Limine Boot Protocol v3 UEFI + Legacy BIOS hybrid GPT boot, COM1 16550 UART, linear framebuffer console, structured `dmesg` logger, RBP panic backtrace, CPUID feature detection (`CR0.WP`, `EFER.NXE`, `EFER.SCE`, `CR4.PGE`, `CR4.SMEP`), 64-bit GDT + TSS (`IST1..3`), 256-entry IDT, 8259 PIC remap (`32..47`), and fail-closed Bitmap PMM.
-- **Milestone 2 (Memory Management)**: 4-level `x86_64` page tables, `AddressSpace` VMM with `W^X` enforcement, Demand Paging (`PTE_DEMAND`), Copy-on-Write (`PTE_COW`) + PMM `SharedRefTable` reference counting, Guard Pages (`PTE_GUARD`), and 2 MiB Coalescing Kernel Heap Allocator (`0xAE74_EC01` canary).
-- **Milestone 3 (Scheduler & Synchronization)**: 1000 Hz PIT (`IRQ0`) preemptive priority round-robin scheduler, `SpinLock`, `IrqSpinLock`, `WaitQueue`, `Mutex`, `Semaphore`, `RwLock`.
-- **Milestone 4 (Ring 3 & Syscall ABI v1)**: Per-CPU `GS_BASE`/`KERNEL_GS_BASE`, `SYSCALL`/`SYSRET` entry (`IA32_LSTAR`), canonical user pointer validation (`mm::user_access`), `fork`, `wait4`, `brk`, `mmap`, `munmap`, `mprotect`, and Ring 3 `#PF`/`#GP` process fault isolation.
-- **Milestone 5 (IPC)**: Anonymous pipes (`pipe`/`pipe2`), named FIFOs (`mkfifo`), `AF_UNIX` stream/dgram sockets, shared memory (`shm_open`/`shm_unlink` + `mmap`), signals (`kill`), and `poll`.
-- **Milestone 6 (VFS)**: Unified VFS, Linux-like directory hierarchy, `/dev/{null,zero,random,urandom,console,tty,serial}`, `/proc/{version,uptime,meminfo,cpuinfo,mounts,syscalls,gui}`, `/tmp` sticky bit, symlinks/hardlinks, and USTAR `initramfs.tar` unpacker.
-- **Milestone 7 (AetherFS v1 `>= 1 PiB`)**: 64-bit extent-based journaling filesystem (`crates/aether-fs-core`), Primary (`LBA 1`) + Backup (`LBA 2`) superblock failover, Castagnoli CRC32C checksums on superblocks/inodes/journal, and Write-Ahead Journal (`AETHJRNL`) crash recovery.
-- **Milestone 8, 9, 10, 11 (ELF64 & Ring 3 User Space)**: Fuzz-tested ELF64 loader (`crates/aether-elf` + `kernel/src/sched/exec.rs`), UUID identity database (`root`, `aether`, `wheel`), UUID ACLs, `execute_as_uuid` transitions, compiled Ring 3 `/sbin/init`, `/bin/aethersh` (pipelines `|`, redirections `>`/`>>`/`<`), `/bin/sudo`, `/bin/aetherpkg`, and 31 core utilities (`ls`, `cat`, `grep`, `wc`, `ps`, `kill`, `id`, `whoami`, `groups`, `stat`, `chmod`, `chown`, `chgrp`, `getfacl`, `setfacl`, `useradd`, etc.).
-- **Milestone 12, 13, 14 (Drivers, Net, Hardening & GUI)**: PCI Type-1 bus scanner, CMOS RTC, PS/2 controller, Ethernet/ARP/IPv4/ICMP/UDP network stack (2,000-packet fuzz tested), `RDTSC` hardware microbenchmarks, and `800x500` double-buffered 2D desktop compositor (`kernel/src/gui/mod.rs`).
+- **Aether Desktop Environment (`kernel/src/gui/mod.rs`)**:
+  - Upgraded `1280x800` 60 FPS double-buffered software compositor with Dark (`Aurora Slate`) & Light (`Daylight Breeze`) themes, 5 configurable accent color palettes, Night Light filter, 4 virtual workspaces (`WS1..WS4`), left desktop shortcut icons, right-click desktop context menu, bottom taskbar with `[AETHER]` Start Menu Application Launcher, Quick Settings Control Center, and System Notification Center Drawer.
+  - Full multi-window manager supporting mouse click-to-focus, title-bar dragging, bottom-right corner resizing, minimize (`[-]`), maximize/restore (`[+]`), close (`[X]`), and workspace assignment.
+  - 8 Native Integrated Graphical Applications: **Aether Files** (VFS & USB Explorer with UUID/ACL inspector and file preview), **Aether Browser** (HTML DOM & X.509 TLS verified web browser), **Aether Terminal** (interactive `/bin/aethersh` with quick-command chips), **Aether Disks & USB** (partition & mount manager), **Aether Network & Firewall**, **Aether Store** (`AetherPKG` GUI), **Aether System Monitor**, and **Aether Settings & Device Manager** (with persistence to `/etc/desktop.conf`).
+- **USB Host, Mass Storage BOT/SCSI, Partition & FAT32/ISO9660 Subsystem (`kernel/src/usb/mod.rs`, `kernel/src/storage/mod.rs`)**:
+  - PCI USB Host Controller enumeration (`xHCI`, `EHCI`, `OHCI`, `UHCI`) and strict bounds-checked USB descriptor parser.
+  - USB Mass Storage Bulk-Only Transport (`CBW`/`CSW`) and SCSI Command Set (`INQUIRY`, `TEST UNIT READY`, `REQUEST SENSE`, `READ CAPACITY(10)`, `READ(10)`, `WRITE(10)`, `SYNCHRONIZE CACHE(10)`).
+  - MBR and GPT partition table parsers and formatters with boundary validation.
+  - FAT32 BPB/FSInfo/cluster-chain read/write support, ISO9660 (`CD001`) detection, safe label sanitization (`sanitize_volume_label`), automatic mounting of `/dev/sdc1` at `/mnt/usb/AETHER_USB` with `MS_NOSUID | MS_NODEV | MS_NOEXEC`, safe eject with cache flush, and `fsck`.
+- **Complete Internet & Network Stack (`kernel/src/net/mod.rs`)**:
+  - RFC 2131 4-step DHCP Client (`DISCOVER -> OFFER -> REQUEST -> ACK`), RFC 1035 DNS wire resolver with TTL cache, RFC 9293 TCP 3-way handshake & state machine, Stateful Packet Firewall, and HTTP/1.1 + HTTPS/TLS X.509 Certificate Verification client.
+- **Expanded Command-Line Ecosystem (`userspace/bins/src/bin/`)**:
+  - Added 35+ new utilities (`lsusb`, `lspci`, `lsblk`, `blkid`, `findmnt`, `eject`, `sync`, `fsck`, `mkfs`, `ip`, `ifconfig`, `ping`, `route`, `arp`, `dig`, `nslookup`, `host`, `dhclient`, `curl`, `wget`, `netstat`, `ss`, `hostname`, `lscpu`, `lsmem`, `vmstat`, `systemctl`, `journalctl`, `head`, `tail`, `less`, `more`, `basename`, `dirname`, `readlink`, `realpath`, `du`, `sort`, `uniq`, `sha256sum`, `md5sum`, `hexdump`) and shell command chaining (`&&`, `;`).
+
+## [v0.1.0-alpha.1] - 2026-11-18
+- Initial Milestones 0 through 14 release of AetherOS (`x86_64` Higher-Half Kernel, Bitmap PMM, 4-Level VMM, Coalescing Heap, Preemptive Scheduler, Ring 3 `SYSCALL` ABI v1, IPC, VFS, AetherFS v1 `>= 1 PiB`, UUID Security/ACLs, ELF64 Loader, `/sbin/init`, `/bin/aethersh`, `/bin/sudo`, `/bin/aetherpkg`).

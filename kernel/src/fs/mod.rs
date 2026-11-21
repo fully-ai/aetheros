@@ -42,6 +42,7 @@ pub const INODE_FLAG_EXECUTE_AS: u32 = 1 << 2;
 pub const MS_RDONLY: u32 = 1 << 0;
 pub const MS_NOSUID: u32 = 1 << 1;
 pub const MS_NOEXEC: u32 = 1 << 2;
+pub const MS_NODEV: u32 = 1 << 3;
 
 // Dirent file types
 pub const DT_FIFO: u8 = 1;
@@ -419,6 +420,33 @@ impl VfsState {
             },
         );
     }
+
+    fn insert_symlink(&mut self, path: &str, target: &str) {
+        let (ino, obj_uuid) = self.alloc_inode_and_uuid();
+        let now = timer::uptime_ns();
+        self.nodes.insert(
+            String::from(path),
+            VfsNode {
+                inode_id: ino,
+                object_uuid: obj_uuid,
+                owner_user_uuid: Uuid::ROOT_USER,
+                owner_group_uuid: Uuid::ROOT_GROUP,
+                execute_as_uuid: Uuid::NIL,
+                uid: 0,
+                gid: 0,
+                mode: S_IFLNK | 0o777,
+                flags: 0,
+                nlink: 1,
+                ctime_ns: now,
+                mtime_ns: now,
+                atime_ns: now,
+                acl: Vec::new(),
+                kind: NodeKind::Symlink {
+                    target: String::from(target),
+                },
+            },
+        );
+    }
 }
 
 static VFS: IrqSpinLock<VfsState> = IrqSpinLock::new(VfsState::new());
@@ -624,12 +652,20 @@ pub fn init(initramfs: Option<&[u8]>) {
         "/etc",
         "/home",
         "/home/aether",
+        "/home/aether/Desktop",
+        "/home/aether/Documents",
+        "/home/aether/Downloads",
+        "/home/aether/Pictures",
+        "/home/aether/Music",
+        "/home/aether/Videos",
         "/lib",
         "/mnt",
+        "/mnt/usb",
         "/opt",
         "/proc",
         "/root",
         "/run",
+        "/run/media",
         "/usr",
         "/usr/bin",
         "/usr/lib",
@@ -667,6 +703,10 @@ pub fn init(initramfs: Option<&[u8]>) {
     vfs.insert_proc("/proc/mounts", 0o444);
     vfs.insert_proc("/proc/syscalls", 0o444);
     vfs.insert_proc("/proc/gui", 0o444);
+    vfs.insert_proc("/proc/usb", 0o444);
+    vfs.insert_proc("/proc/block", 0o444);
+    vfs.insert_proc("/proc/net", 0o444);
+    vfs.insert_proc("/proc/pci", 0o444);
 
     // Core /etc identity & configuration files
     vfs.insert_file("/etc/hostname", 0o644, 0, 0, Vec::from(&b"aether\n"[..]));
@@ -701,6 +741,68 @@ pub fn init(initramfs: Option<&[u8]>) {
 
     if let Some(tar_bytes) = initramfs {
         unpack_ustar_locked(&mut vfs, tar_bytes);
+    }
+
+    // Populate multi-call `/bin/<util>` symlinks targeting `/bin/ls` (coreutils ELF64 binary)
+    for util in [
+        "chgrp",
+        "getfacl",
+        "setfacl",
+        "useradd",
+        "lsusb",
+        "lspci",
+        "lsblk",
+        "blkid",
+        "findmnt",
+        "eject",
+        "sync",
+        "fsck",
+        "mkfs",
+        "ip",
+        "ifconfig",
+        "ping",
+        "route",
+        "arp",
+        "dig",
+        "nslookup",
+        "host",
+        "dhclient",
+        "curl",
+        "wget",
+        "netstat",
+        "ss",
+        "hostname",
+        "lscpu",
+        "lsmem",
+        "vmstat",
+        "systemctl",
+        "journalctl",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "basename",
+        "dirname",
+        "readlink",
+        "realpath",
+        "du",
+        "sort",
+        "uniq",
+        "cut",
+        "tr",
+        "sed",
+        "awk",
+        "tee",
+        "xxd",
+        "hexdump",
+        "sha256sum",
+        "md5sum",
+        "base64",
+    ] {
+        let bin_path = format!("/bin/{}", util);
+        if !vfs.nodes.contains_key(&bin_path) {
+            vfs.insert_symlink(&bin_path, "/bin/ls");
+        }
     }
 }
 
@@ -785,12 +887,13 @@ fn synthesize_proc_content(vfs: &VfsState, path: &str) -> Option<Vec<u8>> {
             let mut out = String::new();
             for m in &vfs.mounts {
                 let rw = if (m.flags & MS_RDONLY) != 0 { "ro" } else { "rw" };
-                let suid = if (m.flags & MS_NOSUID) != 0 {
-                    ",nosuid"
-                } else {
-                    ""
-                };
-                out.push_str(&format!("{} {} {} {}{}\n", m.source, m.target, m.fstype, rw, suid));
+                let suid = if (m.flags & MS_NOSUID) != 0 { ",nosuid" } else { "" };
+                let nodev = if (m.flags & MS_NODEV) != 0 { ",nodev" } else { "" };
+                let noexec = if (m.flags & MS_NOEXEC) != 0 { ",noexec" } else { "" };
+                out.push_str(&format!(
+                    "{} {} {} {}{}{}{}\n",
+                    m.source, m.target, m.fstype, rw, suid, nodev, noexec
+                ));
             }
             out
         }
@@ -801,6 +904,10 @@ fn synthesize_proc_content(vfs: &VfsState, path: &str) -> Option<Vec<u8>> {
             sched_st.preemptions
         ),
         "/proc/gui" => crate::gui::format_proc_gui(),
+        "/proc/usb" => crate::usb::format_proc_usb(),
+        "/proc/block" => crate::storage::format_proc_block(),
+        "/proc/net" => crate::net::format_proc_net(),
+        "/proc/pci" => crate::drivers::pci::format_proc_pci(),
         _ => return None,
     };
     Some(s.into_bytes())
@@ -1785,8 +1892,56 @@ pub fn vfs_read_all(raw_path: &str) -> Result<Vec<u8>, Errno> {
     let node = vfs.nodes.get(raw_path).ok_or(Errno::Enoent)?;
     match &node.kind {
         NodeKind::Regular { data } => Ok(data.clone()),
+        NodeKind::ProcVirtual => synthesize_proc_content(&vfs, raw_path).ok_or(Errno::Enoent),
         _ => Err(Errno::Einval),
     }
+}
+
+pub fn vfs_read_host_file(raw_path: &str) -> Result<Vec<u8>, Errno> {
+    let norm = normalize_path("/", raw_path)?;
+    vfs_read_all(&norm)
+}
+
+pub fn vfs_write_host_file(raw_path: &str, mode: u32, content: &[u8]) -> Result<(), Errno> {
+    let norm = normalize_path("/", raw_path)?;
+    let mut vfs = VFS.lock();
+    if let Some(existing) = vfs.nodes.get_mut(&norm) {
+        if let NodeKind::Regular { data } = &mut existing.kind {
+            data.clear();
+            data.extend_from_slice(content);
+            existing.mtime_ns = timer::uptime_ns();
+            return Ok(());
+        }
+        return Err(Errno::Eisdir);
+    }
+    vfs.insert_file(&norm, mode, 0, 0, content.to_vec());
+    Ok(())
+}
+
+/// Snapshot directory entries under `dir_raw` as `(basename, is_dir, size_bytes)`.
+pub fn vfs_list_dir_snapshot(dir_raw: &str) -> Vec<(String, bool, u64)> {
+    let Ok(dir_norm) = normalize_path("/", dir_raw) else {
+        return Vec::new();
+    };
+    let vfs = VFS.lock();
+    let prefix = if dir_norm == "/" {
+        String::from("/")
+    } else {
+        format!("{}/", dir_norm)
+    };
+    let mut out = Vec::new();
+    for (k, node) in &vfs.nodes {
+        if k == &dir_norm || !k.starts_with(&prefix) {
+            continue;
+        }
+        let rest = &k[prefix.len()..];
+        if rest.is_empty() || rest.contains('/') {
+            continue;
+        }
+        let is_dir = matches!(node.kind, NodeKind::Directory);
+        out.push((String::from(rest), is_dir, node.file_size()));
+    }
+    out
 }
 
 pub fn vfs_get_node_clone(norm_path: &str) -> Option<VfsNode> {

@@ -19,8 +19,10 @@ pub mod panic;
 pub mod sched;
 pub mod security;
 pub mod selftest;
+pub mod storage;
 pub mod sync;
 pub mod syscall;
+pub mod usb;
 
 use aether_abi::{ABI_VERSION_MAJOR, ABI_VERSION_MINOR};
 use aether_uuid::Uuid;
@@ -203,16 +205,18 @@ pub extern "C" fn _start() -> ! {
         rtc_now.second
     );
 
-    // Stage 12: Initialize Preemptive Scheduler (kthreadd/boot + idle/0) & 1000 Hz PIT Timer IRQ0
+    // Stage 12: Initialize Preemptive Scheduler (kthreadd/boot + idle/0), USB & Block Storage, and 1000 Hz PIT
     if let Err(err) = sched::init() {
         panic!("Preemptive Scheduler init failed: {}", err);
     }
+    usb::init();
     arch::x86_64::timer::init();
     arch::x86_64::sti();
     kinfo!(
-        "Scheduler & Timer active: 1000 Hz PIT (IRQ0 -> vec {}), LAPIC={:#010x}, tasks={}",
+        "Scheduler, USB & Storage active: 1000 Hz PIT (IRQ0 -> vec {}), USB devices={}, Block devices={}, tasks={}",
         arch::x86_64::timer::TIMER_VECTOR,
-        arch::x86_64::timer::lapic_phys_base(),
+        usb::devices().len(),
+        storage::block_devices().len(),
         sched::stats().total_tasks
     );
 

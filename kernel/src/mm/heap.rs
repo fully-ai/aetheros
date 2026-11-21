@@ -17,8 +17,8 @@ use crate::mm::vmm::{AddressSpace, KERNEL_HEAP_BASE, KERNEL_HEAP_MAX_SIZE};
 use crate::mm::{align_up, PAGE_SIZE};
 use crate::sync::IrqSpinLock;
 
-const INITIAL_HEAP_SIZE: usize = 2 * 1024 * 1024; // 2 MiB initial mapped heap
-const HEAP_GROW_CHUNK: usize = 1024 * 1024; // 1 MiB growth step
+const INITIAL_HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB initial mapped heap
+const HEAP_GROW_CHUNK: usize = 2 * 1024 * 1024; // 2 MiB growth step
 const MIN_SPLIT_REMAINDER: usize = size_of::<BlockHeader>() + 32;
 
 const MAGIC_FREE: u64 = 0xAE74_E005_F8EE_B10C;

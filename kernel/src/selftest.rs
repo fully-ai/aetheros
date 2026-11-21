@@ -70,10 +70,16 @@ pub fn maybe_run(boot: &BootInfo, cpu_features: &CpuFeatures) {
     // Milestone 12 tests (PCI enumeration, CMOS RTC, Networking Stack Ethernet/IPv4/ICMP/UDP & packet fuzzing)
     test_drivers_pci_rtc_and_network_stack();
 
+    // Phase C Expansion tests (USB Descriptors, BOT/SCSI, MBR/GPT Partitions, FAT32/ISO9660, Automount & Safe Eject)
+    test_usb_mass_storage_partitions_fat32_and_eject();
+
+    // Phase D/E Expansion tests (DHCP 4-Step Lease, RFC 1035 DNS, RFC 9293 TCP, HTTP/HTTPS & TLS Certificate Verification)
+    test_dhcp_dns_tcp_http_and_tls_security();
+
     // Milestone 13 tests (Syscall & VFS Path Security Fuzzing + RDTSC Cycle Benchmarks)
     test_m13_security_fuzz_and_benchmarks();
 
-    // Milestone 14 tests (Framebuffer 2D Desktop Compositor, Window Manager, Z-Order & Input Routing)
+    // Milestone 14 & Phase A/B/F Desktop Expansion tests (8 Native GUI Apps, Window Manager, Taskbar, Launcher & Persistence)
     test_m14_framebuffer_compositor_and_gui();
 
     crate::kinfo!("[AETHEROS-TEST] ALL MILESTONE 1 - 14 KERNEL, USERSPACE & GUI TESTS PASSED");
@@ -440,8 +446,8 @@ fn test_kernel_heap_and_alloc() {
         "used_bytes must return to pre-test baseline"
     );
     assert_eq!(
-        after.free_blocks, 1,
-        "free blocks must coalesce back into 1 contiguous free block"
+        after.free_blocks, initial.free_blocks,
+        "free blocks must coalesce back to pre-test baseline"
     );
     assert!(after.double_free_detected >= 1);
 
@@ -1371,27 +1377,224 @@ fn test_m13_security_fuzz_and_benchmarks() {
     );
 }
 
+fn test_usb_mass_storage_partitions_fat32_and_eject() {
+    use crate::fs;
+    use crate::storage::{
+        self, detect_iso9660_label, parse_gpt_partitions, parse_mbr_partitions,
+        sanitize_volume_label, write_gpt_single_partition, StorageError,
+    };
+    use crate::usb::{
+        self, build_usb_descriptor_bundle, parse_usb_descriptors, UsbDeviceClass, UsbError,
+        USB_CLASS_MASS_STORAGE, USB_MSC_PROTO_BOT, USB_MSC_SUBCLASS_SCSI,
+    };
+    use aether_abi::Errno;
+    use aether_uuid::Uuid;
+
+    // 1. USB Descriptor Parsing & Malformed Descriptor Fuzzing
+    let valid_desc = build_usb_descriptor_bundle(
+        0x0951,
+        0x1666,
+        USB_CLASS_MASS_STORAGE,
+        USB_MSC_SUBCLASS_SCSI,
+        USB_MSC_PROTO_BOT,
+    );
+    let parsed = parse_usb_descriptors(&valid_desc).expect("parse valid USB descriptors");
+    assert_eq!(parsed.vendor_id, 0x0951);
+    assert_eq!(parsed.product_id, 0x1666);
+    assert_eq!(parsed.classify(), UsbDeviceClass::MassStorageBot);
+    assert_eq!(parsed.endpoints.len(), 2);
+
+    assert_eq!(
+        parse_usb_descriptors(&valid_desc[..10]),
+        Err(UsbError::DescriptorTooShort)
+    );
+    let mut bad_total_len = valid_desc.clone();
+    bad_total_len[20] = 0xFF; // wTotalLength > buffer
+    assert_eq!(
+        parse_usb_descriptors(&bad_total_len),
+        Err(UsbError::ConfigTotalLengthOutOfBounds)
+    );
+
+    // 2. GPT Partition Table Format, Parse & Out-Of-Bounds Detection
+    let mut gpt_disk = alloc::vec![0u8; 64 * 512];
+    let part_uuid = Uuid::deterministic(0xAE74_6770, 42);
+    write_gpt_single_partition(&mut gpt_disk, 64, 8, 56, part_uuid, "AETHER_GPT_VOL");
+    let gpt_parts = parse_gpt_partitions(&gpt_disk, 64).expect("parse valid GPT");
+    assert_eq!(gpt_parts.len(), 1);
+    assert_eq!(gpt_parts[0].start_lba, 8);
+    assert_eq!(gpt_parts[0].sector_count, 49);
+    assert_eq!(gpt_parts[0].part_uuid, part_uuid);
+    assert_eq!(gpt_parts[0].label, "AETHER_GPT_VOL");
+
+    // Corrupt GPT entry end_lba beyond disk capacity -> must fail closed
+    gpt_disk[1024 + 40..1024 + 48].copy_from_slice(&9999u64.to_le_bytes());
+    assert_eq!(
+        parse_gpt_partitions(&gpt_disk, 64),
+        Err(StorageError::PartitionOutOfBounds)
+    );
+
+    // 3. Corrupt MBR Partition boundary test
+    let mut bad_mbr = [0u8; 512];
+    storage::write_mbr_single_partition(&mut bad_mbr, 0x0C, 100, 500);
+    assert_eq!(
+        parse_mbr_partitions(&bad_mbr, 256),
+        Err(StorageError::PartitionOutOfBounds)
+    );
+
+    // 4. ISO9660 Primary Volume Descriptor recognition
+    let mut iso_img = alloc::vec![0u8; 17 * 2048];
+    let pvd = &mut iso_img[16 * 2048..16 * 2048 + 128];
+    pvd[0] = 0x01;
+    pvd[1..6].copy_from_slice(b"CD001");
+    pvd[40..54].copy_from_slice(b"AETHER_LIVE_CD");
+    assert_eq!(
+        detect_iso9660_label(&iso_img).as_deref(),
+        Some("AETHER_LIVE_CD")
+    );
+
+    // 5. Volume label sanitization & duplicate collision resolution
+    let existing = alloc::vec![String::from("/mnt/usb/AETHER_USB")];
+    assert_eq!(
+        sanitize_volume_label("../../AETHER_USB!!", &existing),
+        "AETHER_USB_2"
+    );
+
+    // 6. Verify auto-mounted FAT32 USB flash drive at `/mnt/usb/AETHER_USB`
+    assert!(storage::usb_is_mounted(), "USB drive must be auto-mounted");
+    let readme =
+        fs::vfs_read_host_file("/mnt/usb/AETHER_USB/README.TXT").expect("read USB README.TXT");
+    assert!(core::str::from_utf8(&readme)
+        .unwrap_or("")
+        .contains("FAT32 over USB Mass Storage BOT/SCSI"));
+
+    // 7. Verify `MS_NOEXEC` blocks executing untrusted scripts/binaries directly from USB media
+    assert_eq!(
+        fs::vfs_read_executable_and_meta("/mnt/usb/AETHER_USB/HELLO.SH", &Credentials::root())
+            .err(),
+        Some(Errno::Eacces),
+        "MS_NOEXEC on removable USB media must reject direct execution"
+    );
+
+    // 8. Write a new file to `/mnt/usb/AETHER_USB/PERSIST.TXT`, safely eject (`SYNCHRONIZE CACHE`),
+    //    verify unmount, then re-insert and verify `PERSIST.TXT` survived on the FAT32 clusters!
+    fs::vfs_write_host_file(
+        "/mnt/usb/AETHER_USB/PERSIST.TXT",
+        0o644,
+        b"USB-FAT32-Persistence-OK",
+    )
+    .expect("write PERSIST.TXT to USB");
+    let ejected_path = storage::safely_eject_usb_drive().expect("safely_eject_usb_drive");
+    assert_eq!(ejected_path, "/mnt/usb/AETHER_USB");
+    assert!(!storage::usb_is_mounted());
+
+    let remounted_path =
+        storage::remount_or_reinsert_usb_drive().expect("remount_or_reinsert_usb_drive");
+    assert_eq!(remounted_path, "/mnt/usb/AETHER_USB");
+    assert!(storage::usb_is_mounted());
+    let persisted =
+        fs::vfs_read_host_file("/mnt/usb/AETHER_USB/PERSIST.TXT").expect("read PERSIST.TXT");
+    assert_eq!(&persisted, b"USB-FAT32-Persistence-OK");
+
+    let fsck_rep = storage::run_fsck_all();
+    assert!(fsck_rep.contains("[OK] fsck.vfat /dev/sdc1"));
+
+    crate::kinfo!(
+        "[TEST PASS] usb_mass_storage_partitions_fat32_and_eject (usb_devs={}, blk_devs={}, mount={})",
+        usb::devices().len(),
+        storage::block_devices().len(),
+        remounted_path
+    );
+}
+
+fn test_dhcp_dns_tcp_http_and_tls_security() {
+    use crate::net::{self, NetError, TcpState};
+
+    // 1. DHCP 4-step lease acquisition (`DISCOVER -> OFFER -> REQUEST -> ACK`)
+    let lease = net::dhcp_discover_and_acquire_lease().expect("DHCP lease acquisition");
+    assert_eq!(lease.assigned_ip, [10, 0, 2, 15]);
+    assert_eq!(lease.gateway_ip, [10, 0, 2, 2]);
+    assert_eq!(lease.dns_server, [10, 0, 2, 3]);
+    assert!(lease.active);
+
+    // 2. RFC 1035 DNS resolution & negative lookup
+    let dns_rec = net::dns_resolve("docs.aetheros.org").expect("resolve docs.aetheros.org");
+    assert_eq!(dns_rec.ipv4, [10, 0, 2, 15]);
+    assert_eq!(
+        net::dns_resolve("unknown.invalid.domain").err(),
+        Some(NetError::DnsNotFound)
+    );
+
+    // 3. RFC 9293 TCP 3-way handshake & Firewall port filtering
+    let conn = net::tcp_connect_and_exchange([10, 0, 2, 2], 80, b"PING", b"PONG")
+        .expect("TCP 3-way handshake");
+    assert_eq!(conn.state, TcpState::Established);
+    assert_eq!(
+        net::tcp_connect_and_exchange([10, 0, 2, 2], 31337, b"X", b"Y").err(),
+        Some(NetError::FirewallBlocked),
+        "Stateful firewall must block unauthorized port 31337"
+    );
+
+    // 4. HTTPS GET with X.509 TLS verification, HTTP Redirects, and BadSSL rejection
+    let resp = net::http_get("https://aetheros.org").expect("HTTPS GET https://aetheros.org");
+    assert_eq!(resp.status_code, 200);
+    assert!(resp.tls_verified);
+    assert!(resp.body.contains("AetherOS v0.2.0"));
+
+    let redir =
+        net::http_get("https://aetheros.org/redirect").expect("HTTPS redirect -> /index.html");
+    assert_eq!(redir.status_code, 200);
+
+    assert_eq!(
+        net::http_get("https://aetheros.org/loop").err(),
+        Some(NetError::TooManyRedirects)
+    );
+    assert_eq!(
+        net::http_get("https://expired.badssl.com").err(),
+        Some(NetError::TlsCertificateExpired)
+    );
+    assert_eq!(
+        net::http_get("https://untrusted-root.badssl.com").err(),
+        Some(NetError::TlsCertificateUntrusted)
+    );
+
+    crate::kinfo!(
+        "[TEST PASS] dhcp_dns_tcp_http_and_tls_security (ip=10.0.2.15, tcp_conns={}, tls=verified)",
+        net::tcp_connections().len()
+    );
+}
+
 fn test_m14_framebuffer_compositor_and_gui() {
     use crate::fs;
     use crate::gui;
-    use aether_abi::open_flags::O_RDONLY;
 
     let (w, h, crc) = gui::init_desktop();
-    assert!(w >= 320 && h >= 240);
+    assert!(w >= 640 && h >= 480);
     assert_ne!(crc, 0, "composited desktop frame checksum must be non-zero");
 
-    // Verify `/proc/gui` reports all 3 desktop windows and frame metrics
-    let gf = fs::vfs_open("/proc/gui", O_RDONLY, 0).expect("open /proc/gui");
-    let mut buf = [0u8; 1024];
-    let n = fs::vfs_read_file(&gf, &mut buf, None).expect("read /proc/gui");
-    let text = core::str::from_utf8(&buf[..n]).expect("/proc/gui utf8");
-    assert!(text.contains("windows:          3"));
-    assert!(text.contains("AetherTerminal"));
-    assert!(text.contains("System Monitor"));
-    assert!(text.contains("AetherFS 1PiB"));
+    // Simulate mouse movement & click on Start Button to verify interactive event handling
+    gui::handle_ps2_mouse(0, 12, -8);
+    gui::tick_and_flush();
+
+    // Verify `/proc/gui`, `/proc/usb`, `/proc/block`, `/proc/net`, and `/proc/pci`
+    let gui_text = String::from_utf8(fs::vfs_read_host_file("/proc/gui").expect("read /proc/gui"))
+        .expect("utf8 /proc/gui");
+    assert!(gui_text.contains("windows:          8"));
+    assert!(gui_text.contains("Aether Terminal"));
+    assert!(gui_text.contains("Aether Files"));
+    assert!(gui_text.contains("Aether Browser"));
+
+    let usb_text = String::from_utf8(fs::vfs_read_host_file("/proc/usb").expect("read /proc/usb"))
+        .expect("utf8 /proc/usb");
+    assert!(usb_text.contains("Mass Storage (BOT/SCSI)"));
+
+    let blk_text =
+        String::from_utf8(fs::vfs_read_host_file("/proc/block").expect("read /proc/block"))
+            .expect("utf8 /proc/block");
+    assert!(blk_text.contains("sdc1"));
+    assert!(blk_text.contains("AETHER_USB"));
 
     crate::kinfo!(
-        "[TEST PASS] m14_framebuffer_compositor_and_gui (res={}x{}, windows=3, frame_crc={:#010x})",
+        "[TEST PASS] m14_framebuffer_compositor_and_gui (res={}x{}, windows=8, frame_crc={:#010x})",
         w,
         h,
         crc

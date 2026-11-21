@@ -1,18 +1,14 @@
-# AetherOS Security Verification Report
+# AetherOS Security Verification Report (`AETHEROS_SECURITY_REPORT.md`)
 
-See also [SECURITY_MODEL.md](file:///home/ubeyt/Belgeler/AetherOS/SECURITY_MODEL.md) and [SECURITY_HARDENING.md](file:///home/ubeyt/Belgeler/AetherOS/SECURITY_HARDENING.md).
-
-## 1. Executed Security & Adversarial Test Cases
-
-| Threat Scenario | Test Location | Observed Kernel Response | Result |
+| Threat / Adversarial Test Case | Verification Test | Observed Kernel Defense | Status |
 | :--- | :--- | :--- | :--- |
-| **Ring 3 Read of Higher-Half Kernel Memory (`0xffffffff80000000`)** | `test_ring3_fault_isolation` | Hardware `#PF` (`err=0x5 U=1`); offending PID terminated (`exit_code=139`); kernel continues unharmed | **PASS** |
-| **Ring 3 Execution of Privileged Instruction (`cli`)** | `test_ring3_fault_isolation` | Hardware `#GP` (`vec=13`); offending PID terminated (`exit_code=139`); kernel continues unharmed | **PASS** |
-| **Syscall Pointer Targeting Kernel / Non-Canonical / Null Memory** | `test_ring3_syscalls_fork_and_pointer_validation`, `test_m13_security_fuzz_and_benchmarks` | Rejected by `mm::user_access::validate_user_range` with `-EFAULT` (`-14`) before dereference | **PASS** |
-| **Unprivileged UID 1000 Reading `/etc/secret.conf` (`0600`) or `/etc/sudoers` (`0440`)** | `test_multiuser_permissions_acl_and_execute_as`, `test_m13_security_fuzz_and_benchmarks` | Denied by `fs::check_node_permission` with `-EACCES` (`-13`) | **PASS** |
-| **Unprivileged UID 1000 Deleting Root-Owned File in Sticky `/tmp` (`01777`)** | `test_multiuser_permissions_acl_and_execute_as` | Denied by sticky-bit guard in `fs::vfs_unlink` with `-EPERM` (`-1`) | **PASS** |
-| **Unprivileged UID 1000 Assigning `execute_as_uuid = ROOT_USER` to Binary** | `test_multiuser_permissions_acl_and_execute_as` | Denied with `-EPERM` and logged `[AUDIT] action=DENIED_SET_EXECUTE_AS` | **PASS** |
-| **`execute_as_uuid` Elevation on `MS_NOSUID` Mount or `no_new_privs` Process** | `test_multiuser_permissions_acl_and_execute_as` | Blocked with `-EPERM` and logged `[AUDIT] action=BLOCKED_EXEC_ELEVATION_NOSUID_OR_NNP` | **PASS** |
-| **Malformed ELF64 Targeting Kernel Vaddr or `W^X` Segment** | `crates/aether-elf` (`10,000` fuzz iterations) | Rejected with `KernelOrNullAddressTarget` / `WritableAndExecutableSegment`; zero panics | **PASS** |
-| **Malformed / Truncated IPv4 & ICMP Network Packets** | `test_drivers_pci_rtc_and_network_stack` (`2,000` fuzz iterations) | Rejected by header length & RFC 1071 checksum validation; zero panics | **PASS** |
-| **On-Disk AetherFS Inode or Primary Superblock Bit-Flip Corruption** | `crates/aether-fs-core` | Inode tampering caught via CRC32C (`CorruptedInodeChecksum`); Primary Superblock fails over to LBA 2 Backup | **PASS** |
+| **Direct Execution from Removable USB Drive (`/mnt/usb/AETHER_USB/HELLO.SH`)** | `test_usb_mass_storage_partitions_fat32_and_eject` | Blocked by `MS_NOEXEC` on removable USB mount with `Errno::Eacces` | **PASS** |
+| **Path Traversal / Duplicate Collision in Removable Volume Label (`../../AETHER_USB!!`)** | `test_usb_mass_storage_partitions_fat32_and_eject` | Sanitized by `sanitize_volume_label` to `"AETHER_USB_2"` | **PASS** |
+| **Malformed / Truncated USB Descriptors & Out-of-Bounds `wTotalLength`** | `test_usb_mass_storage_partitions_fat32_and_eject` | Rejected with `DescriptorTooShort` / `ConfigTotalLengthOutOfBounds` | **PASS** |
+| **Corrupted MBR & GPT Partition Tables Exceeding Disk LBA Capacity** | `test_usb_mass_storage_partitions_fat32_and_eject` | Rejected with `StorageError::PartitionOutOfBounds` | **PASS** |
+| **Expired or Untrusted HTTPS X.509 Server Certificates (`expired.badssl.com`, `untrusted-root.badssl.com`)** | `test_dhcp_dns_tcp_http_and_tls_security` | Rejected with `TlsCertificateExpired` / `TlsCertificateUntrusted` | **PASS** |
+| **Infinite HTTP Redirect Loop (`/loop`)** | `test_dhcp_dns_tcp_http_and_tls_security` | Rejected after 5 hops with `NetError::TooManyRedirects` | **PASS** |
+| **Unauthorized TCP/UDP Connection to Blocked Ports (`23`, `31337`)** | `test_dhcp_dns_tcp_http_and_tls_security` | Blocked by Stateful Firewall with `NetError::FirewallBlocked` | **PASS** |
+| **Ring 3 Kernel Memory Read (`#PF`) & Privileged Instruction (`cli` `#GP`)** | `test_ring3_fault_isolation` | Offending PID terminated (`exit_code=139`); kernel continues | **PASS** |
+| **Syscall User Pointer Targeting Kernel / Non-Canonical Memory** | `test_m13_security_fuzz_and_benchmarks` | Rejected by `mm::user_access` with `-EFAULT` | **PASS** |
+| **Unprivileged UID 1000 Modifying `execute_as_uuid` or Sticky `/tmp` Root Files** | `test_multiuser_permissions_acl_and_execute_as` | Rejected with `-EPERM` and recorded in `[AUDIT]` log | **PASS** |

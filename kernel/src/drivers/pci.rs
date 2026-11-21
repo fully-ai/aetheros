@@ -37,9 +37,11 @@ impl PciDeviceInfo {
             (0x01, 0x08) => "NVMe Storage",
             (0x02, 0x00) => "Ethernet Network",
             (0x03, 0x00) => "VGA Compatible Display",
+            (0x04, 0x01) | (0x04, 0x03) => "HD Audio Controller",
             (0x06, 0x00) => "Host Bridge",
             (0x06, 0x01) => "ISA Bridge",
             (0x06, 0x80) => "System Bridge",
+            (0x0C, 0x03) => "USB Host Controller",
             _ => "PCI Device",
         }
     }
@@ -124,4 +126,27 @@ pub fn init_and_enumerate() -> usize {
 
 pub fn devices() -> Vec<PciDeviceInfo> {
     PCI_DEVICES.lock().clone()
+}
+
+pub fn format_proc_pci() -> alloc::string::String {
+    use alloc::format;
+    let devs = PCI_DEVICES.lock();
+    let mut out = alloc::string::String::new();
+    for d in devs.iter() {
+        out.push_str(&format!(
+            "{:02x}:{:02x}.{} {:04x}:{:04x} class={:02x}{:02x} prog_if={:02x} irq={:<2} bar0={:#010x} {}\n",
+            d.bus,
+            d.device,
+            d.function,
+            d.vendor_id,
+            d.device_id,
+            d.class_code,
+            d.subclass,
+            d.prog_if,
+            d.irq_line,
+            d.bar0,
+            d.class_name()
+        ));
+    }
+    out
 }

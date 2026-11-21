@@ -37,7 +37,7 @@ cp "$USERSPACE_OUT/sudo" "$USERSPACE_ROOT/bin/sudo"
 cp "$USERSPACE_OUT/aetherpkg" "$USERSPACE_ROOT/bin/aetherpkg"
 cp "$USERSPACE_OUT/coreutils" "$USERSPACE_ROOT/sbin/useradd"
 
-for util in ls cat grep wc ps kill id whoami groups stat chmod chown chgrp getfacl setfacl useradd mkdir rmdir touch rm cp mv uname uptime free df dmesg mount umount; do
+for util in ls cat grep wc ps kill id whoami groups stat chmod chown mkdir rmdir touch rm cp mv uname uptime free df dmesg mount umount; do
     cp "$USERSPACE_OUT/coreutils" "$USERSPACE_ROOT/bin/$util"
 done
 
