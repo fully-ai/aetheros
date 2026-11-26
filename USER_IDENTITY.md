@@ -1,6 +1,6 @@
 # AetherOS User & Group Identity Specification
 
-See also [USER_GROUP_UUID_SECURITY.md](file:///home/ubeyt/Belgeler/AetherOS/USER_GROUP_UUID_SECURITY.md).
+See also [USER_GROUP_UUID_SECURITY.md](USER_GROUP_UUID_SECURITY.md).
 
 ## 1. Dual UUID + POSIX Identity Mapping
 

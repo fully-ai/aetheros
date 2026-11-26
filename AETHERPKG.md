@@ -1,6 +1,6 @@
 # AetherPKG & Aether Store Specification (`AETHERPKG.md`)
 
-See also [PACKAGE_MANAGER.md](file:///home/ubeyt/Belgeler/AetherOS/PACKAGE_MANAGER.md).
+See also [PACKAGE_MANAGER.md](PACKAGE_MANAGER.md).
 
 ## 1. Signed Repository Catalog (`userspace/bins/src/bin/aetherpkg.rs`, `AppKind::Store`)
 

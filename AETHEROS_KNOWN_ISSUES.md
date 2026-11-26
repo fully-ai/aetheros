@@ -1,6 +1,6 @@
 # AetherOS Known Issues & Scope Boundaries (`AETHEROS_KNOWN_ISSUES.md`)
 
-See also [KNOWN_ISSUES.md](file:///home/ubeyt/Belgeler/AetherOS/KNOWN_ISSUES.md).
+See also [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 1. **Physical Wi-Fi (`802.11` WPA2/WPA3) Hardware Drivers**:
    - Per Section 5.6 ("Do not invent Wi-Fi support if the target driver is unavailable. Test the networking stack first using QEMU virtual Ethernet"), AetherOS implements its full DHCP, DNS, TCP/IP, HTTP/HTTPS, and Firewall stack over wired Ethernet (`eth0`, VirtIO-Net / Intel E1000) and clearly reports Wi-Fi / Bluetooth hardware as unsupported in virtualized QEMU x86_64 environments.

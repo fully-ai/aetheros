@@ -1,6 +1,6 @@
 # AetherOS Networking Architecture
 
-See also [NETWORK_STACK.md](file:///home/ubeyt/Belgeler/AetherOS/NETWORK_STACK.md).
+See also [NETWORK_STACK.md](NETWORK_STACK.md).
 
 ## 1. Protocol Stack Diagram
 

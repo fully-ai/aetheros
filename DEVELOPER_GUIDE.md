@@ -1,6 +1,6 @@
 # AetherOS Developer Guide (`DEVELOPER_GUIDE.md`)
 
-See also [BUILD_AND_QEMU_GUIDE.md](file:///home/ubeyt/Belgeler/AetherOS/BUILD_AND_QEMU_GUIDE.md) and [DEVELOPMENT.md](file:///home/ubeyt/Belgeler/AetherOS/DEVELOPMENT.md).
+See also [BUILD_AND_QEMU_GUIDE.md](BUILD_AND_QEMU_GUIDE.md) and [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## 1. Workspace Layout
 - `crates/aether-abi`: Shared `no_std` Syscall ABI v1 numbers, `Errno`, `AetherStat`, `Dirent64`, `PollFd`, `ProcInfo`.

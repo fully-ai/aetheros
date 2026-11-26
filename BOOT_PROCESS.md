@@ -1,6 +1,6 @@
 # AetherOS Boot Process Architecture
 
-See also [KERNEL_DESIGN.md](file:///home/ubeyt/Belgeler/AetherOS/KERNEL_DESIGN.md) and [docs/adr/0001-bootloader-limine.md](file:///home/ubeyt/Belgeler/AetherOS/docs/adr/0001-bootloader-limine.md).
+See also [KERNEL_DESIGN.md](KERNEL_DESIGN.md) and [docs/adr/0001-bootloader-limine.md](docs/adr/0001-bootloader-limine.md).
 
 ## 1. Hybrid UEFI + Legacy BIOS GPT Disk Image (`scripts/image.sh`)
 

@@ -1,6 +1,6 @@
 # AetherOS Security Policy & Vulnerability Reporting
 
-See [SECURITY_MODEL.md](file:///home/ubeyt/Belgeler/AetherOS/SECURITY_MODEL.md) and [SECURITY_HARDENING.md](file:///home/ubeyt/Belgeler/AetherOS/SECURITY_HARDENING.md) for the complete architecture specification.
+See [SECURITY_MODEL.md](SECURITY_MODEL.md) and [SECURITY_HARDENING.md](SECURITY_HARDENING.md) for the complete architecture specification.
 
 ## 1. Security Invariants Enforced by Default
 - **Hardware Page & Execution Protections**: `CR0.WP`, `EFER.NXE`, `CR4.SMEP`, strict `W^X` in both VMM and ELF64 loading, and unmapped `PTE_GUARD` user stack guard pages.

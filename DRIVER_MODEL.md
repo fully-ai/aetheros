@@ -1,6 +1,6 @@
 # AetherOS Device Driver Model
 
-See also [DRIVERS_AND_DEVICES.md](file:///home/ubeyt/Belgeler/AetherOS/DRIVERS_AND_DEVICES.md).
+See also [DRIVERS_AND_DEVICES.md](DRIVERS_AND_DEVICES.md).
 
 ## 1. Driver Isolation & Hardware Access Layers
 

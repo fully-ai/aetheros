@@ -1,6 +1,6 @@
 [package]
 name = "libaether"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 edition = "2021"
 license = "MIT"
 description = "AetherOS native Ring 3 user-space runtime, allocator, and syscall library"

@@ -1,6 +1,6 @@
 [package]
 name = "aether-user-bins"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 edition = "2021"
 license = "MIT"
 description = "Native AetherOS Ring 3 ELF64 system binaries (/sbin/init, /bin/aethersh, coreutils, aetherpkg)"

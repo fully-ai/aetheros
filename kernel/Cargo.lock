@@ -4,29 +4,29 @@ version = 4
 
 [[package]]
 name = "aether-abi"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "aether-elf"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "aether-abi",
 ]
 
 [[package]]
 name = "aether-fs-core"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "aether-uuid",
 ]
 
 [[package]]
 name = "aether-uuid"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "aetheros-kernel"
-version = "0.1.0-alpha.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "aether-abi",
  "aether-elf",

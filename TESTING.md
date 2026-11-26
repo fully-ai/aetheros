@@ -1,6 +1,6 @@
 # AetherOS Testing & Verification Architecture
 
-See also [TESTING_AND_VERIFICATION.md](file:///home/ubeyt/Belgeler/AetherOS/TESTING_AND_VERIFICATION.md) and [TEST_STATUS.md](file:///home/ubeyt/Belgeler/AetherOS/TEST_STATUS.md).
+See also [TESTING_AND_VERIFICATION.md](TESTING_AND_VERIFICATION.md) and [TEST_STATUS.md](TEST_STATUS.md).
 
 ## 1. Two-Tier Verification Pipeline (`./scripts/test.sh`)
 

@@ -1,6 +1,6 @@
 # AetherOS Virtual Filesystem (VFS) Specification
 
-See also [VFS_DESIGN.md](file:///home/ubeyt/Belgeler/AetherOS/VFS_DESIGN.md) and [AETHERFS_SPEC.md](file:///home/ubeyt/Belgeler/AetherOS/AETHERFS_SPEC.md).
+See also [VFS_DESIGN.md](VFS_DESIGN.md) and [AETHERFS_SPEC.md](AETHERFS_SPEC.md).
 
 ## 1. VFS Path Resolution & Mount Routing
 

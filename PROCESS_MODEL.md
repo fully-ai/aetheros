@@ -1,6 +1,6 @@
 # AetherOS Process & Thread Model
 
-See also [PROCESS_AND_SCHEDULING.md](file:///home/ubeyt/Belgeler/AetherOS/PROCESS_AND_SCHEDULING.md).
+See also [PROCESS_AND_SCHEDULING.md](PROCESS_AND_SCHEDULING.md).
 
 ## 1. Process Lifecycle State Machine
 

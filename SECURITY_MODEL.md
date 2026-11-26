@@ -1,6 +1,6 @@
 # AetherOS Security Model
 
-See also [SECURITY_HARDENING.md](file:///home/ubeyt/Belgeler/AetherOS/SECURITY_HARDENING.md), [PERMISSIONS_AND_ACL.md](file:///home/ubeyt/Belgeler/AetherOS/PERMISSIONS_AND_ACL.md), and [SUDO_AND_PRIVILEGE_MODEL.md](file:///home/ubeyt/Belgeler/AetherOS/SUDO_AND_PRIVILEGE_MODEL.md).
+See also [SECURITY_HARDENING.md](SECURITY_HARDENING.md), [PERMISSIONS_AND_ACL.md](PERMISSIONS_AND_ACL.md), and [SUDO_AND_PRIVILEGE_MODEL.md](SUDO_AND_PRIVILEGE_MODEL.md).
 
 ## 1. Permission & Execution Identity Evaluation Flow
 

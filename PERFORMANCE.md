@@ -1,6 +1,6 @@
 # AetherOS Performance & Benchmark Report (`PERFORMANCE.md`)
 
-See also [BENCHMARKS.md](file:///home/ubeyt/Belgeler/AetherOS/BENCHMARKS.md).
+See also [BENCHMARKS.md](BENCHMARKS.md).
 
 ## 1. Hardware `RDTSC` & Compositor Performance Metrics
 

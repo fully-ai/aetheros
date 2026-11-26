@@ -1,6 +1,6 @@
 # AetherOS Preemptive CPU Scheduler
 
-See also [PROCESS_AND_SCHEDULING.md](file:///home/ubeyt/Belgeler/AetherOS/PROCESS_AND_SCHEDULING.md).
+See also [PROCESS_AND_SCHEDULING.md](PROCESS_AND_SCHEDULING.md).
 
 ## 1. Preemptive Scheduling Flow (`kernel/src/sched/mod.rs`)
 

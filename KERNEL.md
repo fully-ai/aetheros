@@ -1,6 +1,6 @@
 # AetherOS Kernel Specification
 
-See also [KERNEL_DESIGN.md](file:///home/ubeyt/Belgeler/AetherOS/KERNEL_DESIGN.md) and [ARCHITECTURE.md](file:///home/ubeyt/Belgeler/AetherOS/ARCHITECTURE.md).
+See also [KERNEL_DESIGN.md](KERNEL_DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 1. Kernel Execution & Memory Model
 

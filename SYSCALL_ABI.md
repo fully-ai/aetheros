@@ -1,6 +1,6 @@
 # AetherOS Native System Call ABI (v1.0)
 
-See also [SYSCALL_SPEC.md](file:///home/ubeyt/Belgeler/AetherOS/SYSCALL_SPEC.md) for the complete system call status table.
+See also [SYSCALL_SPEC.md](SYSCALL_SPEC.md) for the complete system call status table.
 
 ## 1. Syscall Flow Diagram (`Ring 3 -> Ring 0 -> Ring 3`)
 

@@ -1,6 +1,6 @@
 # AetherOS Inter-Process Communication (IPC) Architecture
 
-See also [IPC_DESIGN.md](file:///home/ubeyt/Belgeler/AetherOS/IPC_DESIGN.md).
+See also [IPC_DESIGN.md](IPC_DESIGN.md).
 
 ## 1. IPC Transport Topology
 

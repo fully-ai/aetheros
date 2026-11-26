@@ -1,6 +1,6 @@
 # AetherOS Executable Loading & Ring 3 Execution Model
 
-See also [EXECUTABLE_AND_ELF_LOADER.md](file:///home/ubeyt/Belgeler/AetherOS/EXECUTABLE_AND_ELF_LOADER.md) and [INIT_AND_SERVICES.md](file:///home/ubeyt/Belgeler/AetherOS/INIT_AND_SERVICES.md).
+See also [EXECUTABLE_AND_ELF_LOADER.md](EXECUTABLE_AND_ELF_LOADER.md) and [INIT_AND_SERVICES.md](INIT_AND_SERVICES.md).
 
 ## 1. ELF64 Loading & Ring 3 Entry Pipeline
 

@@ -1,6 +1,6 @@
 # AetherOS Developer Workflow Guide
 
-See also [BUILD_AND_QEMU_GUIDE.md](file:///home/ubeyt/Belgeler/AetherOS/BUILD_AND_QEMU_GUIDE.md).
+See also [BUILD_AND_QEMU_GUIDE.md](BUILD_AND_QEMU_GUIDE.md).
 
 ## 1. Standard Developer Commands (`scripts/`)
 
